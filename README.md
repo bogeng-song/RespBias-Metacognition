@@ -1,29 +1,31 @@
 # Self-monitoring in perceptual decisions by humans and machines
 
-[![DOI](https://img.shields.io/badge/DOI-Pending-blue.svg)](#)
-[![OSF Data](https://img.shields.io/badge/Data_%26_Models-OSF-success.svg)](https://osf.io/[YOUR_OSF_LINK])
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![OSF Data](https://img.shields.io/badge/Data_%26_Weights-OSF-green.svg)](https://osf.io/[YOUR_OSF_LINK])
+[![Paper](https://img.shields.io/badge/Paper-bioRxiv-red.svg)](https://doi.org/[YOUR_DOI_HERE])
 
-Official code repository for the manuscript: **"Self-monitoring in perceptual decisions by humans and machines"** by Bogeng Song and Dobromir Rahnev (School of Psychology, Georgia Institute of Technology).
+> **Official repository for the manuscript:**  
+> Song, B., & Rahnev, D. (2026). *Self-monitoring in perceptual decisions by humans and machines*. 
 
-## 🧠 Overview
-Do perceptual confidence judgments reflect the active self-monitoring of one’s own decisional tendencies, or merely the monitoring of external stimulus uncertainty? 
+## 📖 Overview
+Perceptual confidence is typically conceptualized as monitoring stimulus uncertainty. This project investigates whether humans and Artificial Neural Networks (ANNs) go beyond stimulus uncertainty by engaging in **self-monitoring** of their own decisional tendencies (response biases). 
 
-This repository contains the code to reproduce our findings that:
-1. **Humans** intuitively down-weight their confidence when biased toward a specific category in multi-alternative tasks, a signature of self-monitoring that disappears under speed pressure.
-2. **Standard ANNs** (AlexNet, ResNet18, VGG19) lack this capacity, instead exhibiting artificially inflated confidence for biased categories.
-3. An **unsupervised metacognitive module** can track historical decisional tendencies without trial-by-trial accuracy feedback, applying a bias shift that successfully endows standard ANNs with human-like self-monitoring.
+Using multi-alternative (4- and 8-choice) perceptual decision-making tasks, mixed-effects regressions, and Bayesian multilevel mediation, we demonstrate:
+1. **Humans** naturally down-weight their confidence when biased toward a specific response (a negative direct effect of bias on confidence).
+2. **Standard ANNs** (AlexNet, ResNet18, VGG19) do *not* self-monitor; response bias inflates their confidence.
+3. **Metacognitive ANNs**, augmented with a novel unsupervised self-monitoring module, successfully reproduce the human-like negative bias-confidence relationship.
 
-## 📂 Repository Structure
-* `src/behavior_stats/`: Scripts for mixed-effects regressions (`statsmodels`) and Bayesian hierarchical mediation (`PyMC`) on human psychophysics data.
-* `src/msdt/`: Generative models for Multi-Alternative Signal Detection Theory (M-SDT) parameter estimation.
-* `src/ann_pipeline/`: `PyTorch` scripts to train base models on MNIST, test on noisy inputs, and evaluate raw confidence behavior.
-* `src/metacognition/`: Implementation of the unsupervised metacognitive module (confidence penalty shift $S_k$ based on category selection priors).
-* `notebooks/`: Jupyter notebooks containing the code to generate all main text and supplementary figures.
+## 🗂️ Repository Structure
+
+*   `data/`: Directory for human behavioral datasets and model-generated outputs. *(Note: Large neural network weight files are hosted on OSF).*
+*   `core/`: Shared PyTorch implementations of ANN architectures and datasets.
+*   `scripts_ann/`: PyTorch pipelines to train ANNs, calibrate visual noise, and test baseline vs. metacognitive behaviors.
+*   `scripts_analysis/`: Python scripts for statistical evaluation (`statsmodels` for regressions, `PyMC` for Bayesian mediation and M-SDT).
+*   `notebooks/`: Jupyter notebooks used to generate the figures presented in the manuscript.
 
 ## ⚙️ Installation
-We recommend creating a virtual environment (e.g., using `conda`) to run this code to prevent dependency conflicts with PyMC's C-compiler backend.
+
 
 ```bash
 git clone https://github.com/bogeng-song/self-monitoring-perceptual-decisions.git
