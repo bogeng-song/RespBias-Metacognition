@@ -1,9 +1,26 @@
+# --- Deep Learning & Machine Learning ---
 torch>=2.0.0
-torchvision
-pytorch-lightning
-torchmetrics
-pandas
-numpy
-tqdm
-wandb
-scipy
+torchvision>=0.15.0
+pytorch-lightning>=2.0.0
+torchmetrics>=1.0.0
+scikit-learn>=1.2.0
+wandb>=0.15.0
+
+# --- Data Manipulation & Parallelization ---
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+joblib>=1.3.0
+tqdm>=4.65.0
+
+# --- Statistical Modeling & Bayesian Inference ---
+statsmodels>=0.14.0
+pingouin>=0.5.3
+pymc>=5.0.0
+pytensor>=2.11.0
+arviz>=0.17.0
+
+# --- Visualization & Notebooks ---
+matplotlib>=3.7.0
+seaborn>=0.12.0
+jupyter>=1.0.0
