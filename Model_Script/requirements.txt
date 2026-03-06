@@ -1,0 +1,9 @@
+torch>=2.0.0
+torchvision
+pytorch-lightning
+torchmetrics
+pandas
+numpy
+tqdm
+wandb
+scipy
