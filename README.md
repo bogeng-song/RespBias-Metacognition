@@ -26,7 +26,7 @@ This repository contains the code to reproduce our findings that:
 We recommend creating a virtual environment (e.g., using `conda`) to run this code to prevent dependency conflicts with PyMC's C-compiler backend.
 
 ```bash
-git clone [https://github.com/](https://github.com/)[YourUsername]/self-monitoring-perceptual-decisions.git
+git clone 
 cd self-monitoring-perceptual-decisions
 
 conda create -n metacognition python=3.10
