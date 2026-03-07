@@ -60,7 +60,7 @@ RespBias-Metacognition/
 
 1. Clone the repository:
    ```bash
-   git clone [https://github.com/](https://github.com/)bogeng-song/RespBias-Metacognition.git
+   git clone https://github.com/bogeng-song/RespBias-Metacognition.git
    cd RespBias-Metacognition
    ```
 
