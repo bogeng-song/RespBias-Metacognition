@@ -46,10 +46,8 @@ RespBias-Metacognition/
 │
 ├── notebooks/                        # --- VISUALIZATION & FIGURES ---
 │   ├── visualization.py              # Custom Matplotlib/Seaborn plotting functions
-│   ├── Fig2_Theoretical.ipynb        # Code to reproduce Figure 2 (Correlations)
-│   ├── Fig3_4_Human.ipynb            # Code to reproduce Figures 3 & 4 (Human behavior)
-│   └── Fig5_6_ANN.ipynb              # Code to reproduce Figures 5 & 6 (ANN behavior)
-│
+│   ├── Regression_Mediaiton.ipynb    # Code to do regression and mediation
+│   
 ├── requirements.txt                  # Python dependencies
 └── README.md                       
 ```
