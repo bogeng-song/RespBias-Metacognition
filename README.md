@@ -71,7 +71,7 @@ RespBias-Metacognition/
 
 3. **Data Availability & Pre-trained Models:** 
    Due to GitHub file size limits, raw human behavioral data and the 180 pre-trained ANN model instances (60x AlexNet, 60x ResNet18, 60x VGG19) are hosted on the Open Science Framework (OSF):
-   🔗 **[Link to OSF Repository](https://osf.io/[YOUR_OSF_LINK])**
+   🔗 **[Link to OSF Repository](https://osf.io/nz25w/overview?view_only=36e5bcc2225f4b55a54b77b5f690d786)**
    
    *Extract the downloaded behavioral files into the `data/human_data/` directory, and the ANN weights into a `weights/` directory before running the pipelines.*
 
