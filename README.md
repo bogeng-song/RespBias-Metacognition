@@ -2,7 +2,7 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![OSF Data](https://img.shields.io/badge/Data_%26_Weights-OSF-green.svg)](https://osf.io/[YOUR_OSF_LINK])
+[![OSF Data](https://img.shields.io/badge/Data_%26_Weights-OSF-green.svg)](https://osf.io/nz25w/overview?view_only=36e5bcc2225f4b55a54b77b5f690d786)
 [![Paper](https://img.shields.io/badge/Paper-bioRxiv-red.svg)](https://doi.org/[YOUR_DOI_HERE])
 
 > **Official repository for the manuscript:**  
