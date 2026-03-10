@@ -3,7 +3,6 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![OSF Data](https://img.shields.io/badge/Data_%26_Weights-OSF-green.svg)](https://osf.io/nz25w/overview?view_only=36e5bcc2225f4b55a54b77b5f690d786)
-[![Paper](https://img.shields.io/badge/Paper-bioRxiv-red.svg)](https://doi.org/[YOUR_DOI_HERE])
 
 > **Official repository for the manuscript:**  
 > Song, B., & Rahnev, D. (2026). *Self-monitoring in perceptual decisions by humans and machines*. 
@@ -152,19 +151,6 @@ jupyter notebook
 
 ---
 
-## 📝 Citation
-
-If you use this code or data in your research, please cite our paper:
-
-```bibtex
-@article{song2026selfmonitoring,
-  title={Self-monitoring in perceptual decisions by humans and machines},
-  author={Song, Bogeng and Rahnev, Dobromir},
-  journal={TBD},
-  year={2026},
-  doi={10.xxxx/xxxxxx}
-}
-```
 
 ## ✉️ Contact
 
