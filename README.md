@@ -156,4 +156,3 @@ jupyter notebook
 
 For questions regarding the code, data, or manuscript, please contact **Bogeng Song** at [bsong91@gatech.edu](mailto:bsong91@gatech.edu) or open an issue in this repository.
 
-*Acknowledgments: This work was supported by the National Institutes of Health (award: R01MH119189).*
