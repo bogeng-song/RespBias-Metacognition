@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import numpy as np
 import pandas as pd
 import torch
@@ -9,6 +10,9 @@ from tqdm import tqdm
 
 from core.models import MODEL_DICT
 from core.datasets import NoisyMNISTDataset
+
+# Ensure test_baseline is importable regardless of how this script is invoked
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_baseline import load_model_weights
 
 import warnings
