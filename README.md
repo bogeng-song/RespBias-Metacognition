@@ -346,6 +346,11 @@ The ANN output CSVs use the same column schema as the human data and are process
 
 ---
 
+## 📄 License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+This license is approved by the [Open Source Initiative](https://opensource.org/licenses/MIT).
+
 ## Contact
 
 For questions about the code, data, or manuscript, contact **Bogeng Song** at bsong91@gatech.edu or open an issue in this repository.
