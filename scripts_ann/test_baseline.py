@@ -75,9 +75,9 @@ def generate_behavior_data(model_folder, output_folder, model_name, noise_level,
                 logits = model(imgs)
                 norm_logits = (logits - logits.mean(dim=1, keepdim=True)) / (logits.std(dim=1, keepdim=True) + 1e-8)
                 
-                top2_vals = torch.topk(norm_logits, k=2, dim=1).values
+                top2_vals = torch.topk(logits, k=2, dim=1).values
                 conf_top2_batch = (top2_vals[:, 0] - top2_vals[:, 1]).cpu().numpy()
-                preds = torch.argmax(norm_logits, dim=1).cpu().numpy()
+                preds = torch.argmax(logits, dim=1).cpu().numpy()
                 lbls_np, logits_np, norm_logits_np = lbls.numpy(), logits.cpu().numpy(), norm_logits.cpu().numpy()
 
                 for i in range(len(lbls_np)):
