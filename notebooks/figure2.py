@@ -1,20 +1,25 @@
 """
 figure2.py
-Generates Figure 2 from the manuscript:
-  "Theoretical and empirical relationships between response bias and confidence"
+Generates the example-participant figure (manuscript Figure 3):
+  "Empirical relationships between response bias and confidence"
 
-Panel A: Simulation — optimal confidence vs. response bias (4-choice and 8-choice),
-         derived from average empirical response biases across all participants.
+Note on numbering: in the current manuscript, Figure 1 is the generative SDT
+simulation (see scripts_analysis/simulation.py), Figure 2 is the task schematic
+(not code-generated), and this example-participant figure is Figure 3.
+
+Panel A: Theoretical illustration — optimal confidence vs. response bias
+         (4-choice and 8-choice), derived from average empirical response biases
+         across all participants.
 Panel B: Example participant — bias~confidence, bias~accuracy, and
          bias~confidence-residual (after controlling for accuracy),
          for both the 4-choice (top row) and 8-choice (bottom row).
 
 Usage:
-    python figure2.py \
+    python notebooks/figure2.py \
         --data4 data/human_data/Experiment1_4_choice.csv \
         --data8 data/human_data/Experiment1_8_choice.csv \
         --example_sub 12 \
-        --output figure2.pdf
+        --output figure3_example_participant.pdf
 """
 
 import argparse
