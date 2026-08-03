@@ -72,15 +72,16 @@ def build_combined_exp2_frame(accuracy_agg, speed_agg,
 def aggregate_ann_csv(csv_path, conf_col='conf_meta', n_digits=10,
                       true_col='true_label', pred_col='pred_label',
                       correct_col='correct', instance_col='instance'):
-    """Aggregate a per-image ANN CSV (from test_metacognitive.py /
-    distribution_shift.py / test_baseline.py) to the digit level and z-score.
+    """Aggregate a per-image ANN CSV (from test_metacognitive.py or
+    test_baseline.py) to the digit level and z-score.
 
     For each (instance, digit): accuracy and confidence are averaged over trials
     whose TRUE label is that digit; FAR is the one-vs-rest false-alarm rate
     (tendency to respond that digit when it is not the target), computed with the
-    Hautus-corrected SDT routine. ``conf_col`` selects the confidence readout,
-    e.g. 'conf_meta' (metacognitive, Fig 7) or 'conf_top2diff' (standard ANN,
-    Fig 6).
+    Hautus-corrected SDT routine. ``conf_col`` selects the confidence readout:
+    'conf_meta' is the learned metacognitive head (Figure 6), 'conf_top2diff' and
+    'max_softmax' are the standard, untrained ANN readouts (Figure 5). Because the
+    backbone is frozen, FAR and accuracy are identical across readouts.
 
     Returns a long frame with subject_idx = ANN instance index; use regressors
     ['FAR_z', 'accuracy_z'] (ANNs have no RT).

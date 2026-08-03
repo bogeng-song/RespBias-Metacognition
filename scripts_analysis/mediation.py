@@ -1,195 +1,351 @@
 """
 mediation.py
-Hierarchical Bayesian Mediation Analysis using PyMC.
-Decomposes the effect of Response Bias on Confidence into indirect (via Accuracy) and direct paths.
+Bayesian multilevel mediation of the bias -> accuracy -> confidence path, with
+RANDOM a, b AND c' SLOPES.
+
+    bias (FAR or M-SDT bias)  --a-->  accuracy  --b-->  confidence
+                              \\------- c' --------/       (direct effect)
+
+The direct effect c' is the quantity of interest: a NEGATIVE c' means confidence
+is discounted for alternatives the observer over-selects, once the accuracy
+route has been accounted for -- the signature of bias-aware (self-monitoring)
+confidence.
+
+WHY RANDOM SLOPES ON ALL THREE PATHS
+------------------------------------
+Observers differ not only in baseline confidence (a random intercept) but in how
+strongly bias drives their accuracy (a), how strongly accuracy drives their
+confidence (b), and how strongly bias directly discounts their confidence (c').
+Holding a, b and c' fixed while letting only intercepts vary understates the
+uncertainty on all three, because between-observer slope variability is forced
+into the residual. All five subject effects (two intercepts plus three slopes)
+share a joint LKJ-prior covariance, so they may correlate rather than being
+assumed independent.
+
+That correlation matters for the indirect effect. With random a and b slopes the
+population indirect effect is NOT simply a*b:
+
+    E[(a + u_a)(b + u_b)] = a*b + Cov(u_a, u_b)
+
+so ``indirect_effect`` carries the covariance term explicitly. Reporting a*b
+alone would be biased whenever observers with a stronger a path also have a
+stronger b path.
+
+MODELS
+------
+``run_mediation``            one condition (each Experiment 1 condition, each ANN row).
+``run_moderated_mediation``  both Experiment 2 SAT conditions fitted TOGETHER with
+                             an effect-coded moderator (accuracy = +0.5, speed =
+                             -0.5), so the accuracy-minus-speed difference in the
+                             direct effect (``mod_direct``) and in the indirect
+                             effect (``index_modmed``) each get their own
+                             posterior instead of being compared across two
+                             separate fits.
+
+Usage
+-----
+    from scripts_analysis.mediation import run_mediation, summarize_mediation
+
+    trace = run_mediation(df, predictor='FAR_z')
+    print(summarize_mediation(trace))
 """
+
+import warnings
+
 import numpy as np
 import pandas as pd
 import pymc as pm
 import arviz as az
-import warnings
 
-warnings.filterwarnings("ignore")
+MEDIATION_MODEL_VERSION = 'joint_correlated_random_abc_v1'
 
+# Four chains are required for useful R-hat. Raise draws/tune if a fit is flagged.
+DRAWS = 1000
+TUNE = 1500
+CHAINS = 4
+TARGET_ACCEPT = 0.99
+SEED = 20250720
+
+# Random-effect order inside the joint 5-dimensional covariance.
+RE_M_INTERCEPT, RE_Y_INTERCEPT, RE_A, RE_C, RE_B = range(5)
+RE_LABELS = ('mediator_intercept', 'outcome_intercept', 'a', 'c_prime', 'b')
+
+STANDARD_SUMMARY_VARS = [
+    'a_path', 'b_mediator', 'c_prime', 'indirect_effect', 'total_effect',
+    'mean_subject_indirect', 'sd_a', 'sd_b', 'sd_c_prime',
+    'corr_a_b', 'corr_a_c_prime', 'corr_b_c_prime', 'cov_a_b',
+]
+
+MODERATED_SUMMARY_VARS = [
+    'a_path_acc', 'a_path_speed', 'b_path_acc', 'b_path_speed',
+    'direct_acc', 'direct_speed', 'indirect_acc', 'indirect_speed',
+    'total_acc', 'total_speed', 'mod_direct', 'index_modmed',
+    'a_by_condition', 'b_by_condition', 'c_by_condition',
+    'sd_a', 'sd_b', 'sd_c_prime', 'corr_a_b', 'corr_a_c_prime',
+    'corr_b_c_prime', 'cov_a_b',
+]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 def hdi_star_rating(samples):
-    """Return significance stars based on HDI exclusion of zero."""
-    hdi_999 = az.hdi(samples, hdi_prob=0.999)
-    if hdi_999[0] > 0 or hdi_999[1] < 0: return '***'
-    
-    hdi_99 = az.hdi(samples, hdi_prob=0.99)
-    if hdi_99[0] > 0 or hdi_99[1] < 0: return '**'
-    
-    hdi_95 = az.hdi(samples, hdi_prob=0.95)
-    if hdi_95[0] > 0 or hdi_95[1] < 0: return '*'
-    
-    return 'ns'
+    """Star label from the widest HDI that still excludes zero ('n.s.' if none)."""
+    samples = np.asarray(samples, dtype=float).reshape(-1)
+    for probability, stars in ((0.999, '***'), (0.99, '**'), (0.95, '*')):
+        lo, hi = az.hdi(samples, hdi_prob=probability)
+        if lo > 0 or hi < 0:
+            return stars
+    return 'n.s.'
 
-def run_mixed_effect_mediation(df, predictor_var, mediator_var, outcome_var, subject_id_col='subject_idx', n_samples=2000, n_tune=1000):
-    n_subjects = df[subject_id_col].nunique()
-    subject_idxs = df[subject_id_col].values
-    
+
+def prepare_mediation_data(df, predictor, mediator='accuracy_z', outcome='confidence_z',
+                           moderator=None, subject_id_col='subject_idx'):
+    """Validate and subset the frame; add a contiguous 0-based subject index."""
+    columns = [predictor, mediator, outcome, subject_id_col]
+    if moderator is not None:
+        columns.append(moderator)
+    missing = sorted(set(columns).difference(df.columns))
+    if missing:
+        raise ValueError(f'Missing mediation columns: {missing}')
+    clean = df[columns].dropna().copy()
+    if clean.empty:
+        raise ValueError('No complete rows remain for mediation.')
+    for column in [predictor, mediator, outcome] + ([moderator] if moderator else []):
+        clean[column] = pd.to_numeric(clean[column], errors='raise')
+        if not np.isfinite(clean[column]).all():
+            raise ValueError(f'Non-finite values in {column}.')
+    clean['_subject'] = pd.Categorical(clean[subject_id_col]).codes.astype('int64')
+    smallest = clean.groupby('_subject').size().min()
+    if smallest < 5:
+        warnings.warn(
+            f'Only {int(smallest)} rows in the smallest cluster. Random a/b/c slopes, '
+            'especially their covariance, may be weakly identified; inspect the '
+            'diagnostics and HDIs.', RuntimeWarning)
+    return clean
+
+
+def _joint_random_effects(n_subjects):
+    """Correlated subject effects: mediator intercept, outcome intercept, a, c', b."""
+    chol, corr, stds = pm.LKJCholeskyCov(
+        're_cov', n=5, eta=2.0,
+        sd_dist=pm.HalfNormal.dist(1.0, shape=5),
+        compute_corr=True,
+    )
+    z = pm.Normal('re_z', 0.0, 1.0, shape=(n_subjects, 5))
+    effects = pm.Deterministic('subject_random_effects', pm.math.dot(z, chol.T))
+    # Scalar aliases so summaries stay readable.
+    pm.Deterministic('sd_a', stds[RE_A])
+    pm.Deterministic('sd_c_prime', stds[RE_C])
+    pm.Deterministic('sd_b', stds[RE_B])
+    pm.Deterministic('corr_a_b', corr[RE_A, RE_B])
+    pm.Deterministic('corr_a_c_prime', corr[RE_A, RE_C])
+    pm.Deterministic('corr_b_c_prime', corr[RE_B, RE_C])
+    pm.Deterministic('cov_a_b', corr[RE_A, RE_B] * stds[RE_A] * stds[RE_B])
+    return effects
+
+
+def _sample(model, seed, draws, tune, chains, cores, target_accept):
+    with model:
+        return pm.sample(draws=draws, tune=tune, chains=chains, cores=cores,
+                         target_accept=target_accept, random_seed=seed,
+                         init='jitter+adapt_diag', return_inferencedata=True,
+                         idata_kwargs={'log_likelihood': False})
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Model 1: one condition
+# ──────────────────────────────────────────────────────────────────────────────
+def run_mediation(df, predictor='FAR_z', mediator='accuracy_z', outcome='confidence_z',
+                  subject_id_col='subject_idx', draws=DRAWS, tune=TUNE, chains=CHAINS,
+                  cores=2, target_accept=TARGET_ACCEPT, seed=SEED):
+    """Multilevel mediation with correlated random a, b and c' slopes.
+
+    Returns an ArviZ InferenceData; summarise with ``summarize_mediation``.
+    """
+    clean = prepare_mediation_data(df, predictor, mediator, outcome,
+                                   subject_id_col=subject_id_col)
+    x = clean[predictor].to_numpy(dtype=float)
+    m = clean[mediator].to_numpy(dtype=float)
+    y = clean[outcome].to_numpy(dtype=float)
+    subject = clean['_subject'].to_numpy(dtype='int64')
+    n_subjects = int(subject.max()) + 1
+
     with pm.Model() as model:
-        # Priors for group-level intercepts
-        mu_a_m = pm.Normal('mu_a_m', mu=0, sigma=1)
-        mu_a_y = pm.Normal('mu_a_y', mu=0, sigma=1)
+        random_effects = _joint_random_effects(n_subjects)
 
-        # Random intercepts per subject
-        sigma_a_m = pm.HalfNormal('sigma_a_m', sigma=1)
-        sigma_a_y = pm.HalfNormal('sigma_a_y', sigma=1)
+        mediator_intercept = pm.Normal('mediator_intercept', 0.0, 1.5)
+        outcome_intercept = pm.Normal('outcome_intercept', 0.0, 1.5)
+        a_path = pm.Normal('a_path', 0.0, 1.0)
+        c_prime = pm.Normal('c_prime', 0.0, 1.0)
+        b_mediator = pm.Normal('b_mediator', 0.0, 1.0)
 
-        a_m = pm.Normal('a_m', mu=mu_a_m, sigma=sigma_a_m, shape=n_subjects)
-        a_y = pm.Normal('a_y', mu=mu_a_y, sigma=sigma_a_y, shape=n_subjects)
+        a_subject = pm.Deterministic('a_subject', a_path + random_effects[:, RE_A])
+        c_subject = pm.Deterministic('c_prime_subject', c_prime + random_effects[:, RE_C])
+        b_subject = pm.Deterministic('b_subject', b_mediator + random_effects[:, RE_B])
 
-        # Slopes (fixed effects)
-        b_path = pm.Normal('b_path', mu=0, sigma=1)         # Predictor -> Mediator
-        c_prime = pm.Normal('c_prime', mu=0, sigma=1)       # Predictor -> Outcome (Direct Effect)
-        b_mediator = pm.Normal('b_mediator', mu=0, sigma=1) # Mediator -> Outcome
+        sigma_m = pm.HalfNormal('sigma_m', 1.0)
+        mu_m = (mediator_intercept + random_effects[subject, RE_M_INTERCEPT]
+                + a_subject[subject] * x)
+        pm.Normal('mediator_observed', mu=mu_m, sigma=sigma_m, observed=m)
 
-        # Residuals
-        sigma_m = pm.HalfNormal('sigma_m', 1)
-        sigma_y = pm.HalfNormal('sigma_y', 1)
+        sigma_y = pm.HalfNormal('sigma_y', 1.0)
+        mu_y = (outcome_intercept + random_effects[subject, RE_Y_INTERCEPT]
+                + c_subject[subject] * x + b_subject[subject] * m)
+        pm.Normal('outcome_observed', mu=mu_y, sigma=sigma_y, observed=y)
 
-        # Expected values
-        mediator_hat = a_m[subject_idxs] + b_path * df[predictor_var].values
-        outcome_hat = (
-            a_y[subject_idxs] 
-            + c_prime * df[predictor_var].values
-            + b_mediator * df[mediator_var].values
-        )
+        # E[(a + u_a)(b + u_b)] = a*b + Cov(u_a, u_b)
+        indirect = pm.Deterministic('indirect_effect',
+                                    a_path * b_mediator + model['cov_a_b'])
+        pm.Deterministic('total_effect', c_prime + indirect)
+        pm.Deterministic('mean_subject_indirect',
+                         pm.math.sum(a_subject * b_subject) / n_subjects)
 
-        # Likelihoods
-        pm.Normal('mediator_obs', mu=mediator_hat, sigma=sigma_m, observed=df[mediator_var].values)
-        pm.Normal('outcome_obs', mu=outcome_hat, sigma=sigma_y, observed=df[outcome_var].values)
-
-        # Indirect and total effect
-        pm.Deterministic('indirect_effect', b_path * b_mediator)
-        pm.Deterministic('total_effect', (b_path * b_mediator) + c_prime)
-
-        # Sample (NUTS)
-        trace = pm.sample(n_samples, tune=n_tune, target_accept=0.95, return_inferencedata=True, cores=4)
-        
-    return trace
-
-def summarize_mediation(trace):
-    """Extracts HDI intervals and significance from PyMC trace into a DataFrame."""
-    var_names = ['b_path', 'b_mediator', 'c_prime', 'indirect_effect', 'total_effect']
-    posterior = trace.posterior
-
-    results = []
-    for var in var_names:
-        samples = posterior[var].values.flatten()
-        hdi95 = az.hdi(samples, hdi_prob=0.95)
-        hdi99 = az.hdi(samples, hdi_prob=0.99)
-        hdi999 = az.hdi(samples, hdi_prob=0.999)
-        stars = hdi_star_rating(samples)
-        results.append({
-            "parameter": var,
-            "mean": np.mean(samples),
-            "hdi_95": hdi95,
-            "hdi_99": hdi99,
-            "hdi_999": hdi999,
-            "significance": stars
-        })
-
-    return pd.DataFrame(results)
+    return _sample(model, seed, draws, tune, chains, cores, target_accept)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# JOINT (MODERATED) BAYESIAN MEDIATION — Experiment 2 (speed vs. accuracy)
-#
-# Fits both speed-accuracy-tradeoff conditions together with condition as an
-# effect-coded moderator (W: Accuracy focus = +0.5, Speed focus = -0.5), and
-# decomposes bias -> accuracy -> confidence into condition-specific direct and
-# indirect paths.
-#
-#   Mediator model:  M = a_m[subj] + a1*X + a2*W + a3*(X*W)
-#   Outcome model:   Y = a_y[subj] + c1*X + c2*W + c3*(X*W) + b1*M + b2*(M*W)
-#
-# with X = response bias, M = accuracy, Y = confidence. The key inferential
-# quantities are the per-condition direct effects (direct_acc / direct_speed),
-# the moderation of the direct path (mod_direct == c3), and the index of
-# moderated mediation (index_modmed = indirect_acc - indirect_speed).
-# ══════════════════════════════════════════════════════════════════════════════
+# ──────────────────────────────────────────────────────────────────────────────
+# Model 2: both Experiment 2 conditions fitted together
+# ──────────────────────────────────────────────────────────────────────────────
 def run_moderated_mediation(df, predictor='FAR_z', mediator='accuracy_z',
                             outcome='confidence_z', moderator='Cond_eff',
-                            subject_id_col='subject_idx',
-                            w_acc=0.5, w_speed=-0.5,
-                            n_samples=2000, n_tune=1000, target_accept=0.95,
-                            random_seed=42):
-    """Joint Bayesian moderated mediation for the two Experiment-2 conditions.
+                            subject_id_col='subject_idx', draws=DRAWS, tune=TUNE,
+                            chains=CHAINS, cores=2, target_accept=TARGET_ACCEPT, seed=SEED):
+    """Moderated mediation: both SAT conditions in ONE model.
 
-    ``df`` must contain the predictor (bias), mediator (accuracy), outcome
-    (confidence), an effect-coded ``moderator`` column, and a 0-indexed
-    ``subject_id_col``. Returns the PyMC ``trace``.
+    ``moderator`` must be effect-coded (accuracy = +0.5, speed = -0.5), which
+    makes ``mod_direct`` the accuracy-minus-speed difference in the direct effect
+    and ``index_modmed`` the corresponding difference in the indirect effect.
     """
-    codes = pd.Categorical(df[subject_id_col]).codes
-    n_subj = int(codes.max()) + 1
-    X = df[predictor].values
-    M = df[mediator].values
-    Y = df[outcome].values
-    W = df[moderator].values
+    clean = prepare_mediation_data(df, predictor, mediator, outcome, moderator,
+                                   subject_id_col=subject_id_col)
+    x = clean[predictor].to_numpy(dtype=float)
+    m = clean[mediator].to_numpy(dtype=float)
+    y = clean[outcome].to_numpy(dtype=float)
+    w = clean[moderator].to_numpy(dtype=float)
+    subject = clean['_subject'].to_numpy(dtype='int64')
+    n_subjects = int(subject.max()) + 1
 
     with pm.Model() as model:
-        # --- Mediator model (bias -> accuracy) ---
-        mu_a_m = pm.Normal('mu_a_m', 0, 1)
-        sigma_a_m = pm.HalfNormal('sigma_a_m', 1)
-        a_m = pm.Normal('a_m', mu_a_m, sigma_a_m, shape=n_subj)
-        a1 = pm.Normal('a1', 0, 1)   # bias -> accuracy
-        a2 = pm.Normal('a2', 0, 1)   # condition -> accuracy
-        a3 = pm.Normal('a3', 0, 1)   # bias x condition -> accuracy
-        sigma_m = pm.HalfNormal('sigma_m', 1)
-        mediator_hat = a_m[codes] + a1 * X + a2 * W + a3 * (X * W)
-        pm.Normal('M_obs', mu=mediator_hat, sigma=sigma_m, observed=M)
+        random_effects = _joint_random_effects(n_subjects)
 
-        # --- Outcome model (bias + accuracy -> confidence) ---
-        mu_a_y = pm.Normal('mu_a_y', 0, 1)
-        sigma_a_y = pm.HalfNormal('sigma_a_y', 1)
-        a_y = pm.Normal('a_y', mu_a_y, sigma_a_y, shape=n_subj)
-        c1 = pm.Normal('c1', 0, 1)   # bias -> confidence (direct)
-        c2 = pm.Normal('c2', 0, 1)   # condition -> confidence
-        c3 = pm.Normal('c3', 0, 1)   # bias x condition -> confidence (moderation of direct path)
-        b1 = pm.Normal('b1', 0, 1)   # accuracy -> confidence
-        b2 = pm.Normal('b2', 0, 1)   # accuracy x condition -> confidence
-        sigma_y = pm.HalfNormal('sigma_y', 1)
-        outcome_hat = a_y[codes] + c1 * X + c2 * W + c3 * (X * W) + b1 * M + b2 * (M * W)
-        pm.Normal('Y_obs', mu=outcome_hat, sigma=sigma_y, observed=Y)
+        mediator_intercept = pm.Normal('mediator_intercept', 0.0, 1.5)
+        outcome_intercept = pm.Normal('outcome_intercept', 0.0, 1.5)
 
-        # --- Condition-specific deterministics ---
-        a_acc = pm.Deterministic('a_path_acc', a1 + a3 * w_acc)
-        a_spd = pm.Deterministic('a_path_speed', a1 + a3 * w_speed)
-        b_acc = pm.Deterministic('b_path_acc', b1 + b2 * w_acc)
-        b_spd = pm.Deterministic('b_path_speed', b1 + b2 * w_speed)
-        d_acc = pm.Deterministic('direct_acc', c1 + c3 * w_acc)
-        d_spd = pm.Deterministic('direct_speed', c1 + c3 * w_speed)
-        i_acc = pm.Deterministic('indirect_acc', a_acc * b_acc)
-        i_spd = pm.Deterministic('indirect_speed', a_spd * b_spd)
-        pm.Deterministic('total_acc', d_acc + i_acc)
-        pm.Deterministic('total_speed', d_spd + i_spd)
-        pm.Deterministic('mod_direct', d_acc - d_spd)        # == c3
-        pm.Deterministic('index_modmed', i_acc - i_spd)      # index of moderated mediation
+        a_path = pm.Normal('a_path', 0.0, 1.0)
+        mediator_condition = pm.Normal('mediator_condition', 0.0, 1.0)
+        a_by_condition = pm.Normal('a_by_condition', 0.0, 1.0)
 
-        trace = pm.sample(n_samples, tune=n_tune, target_accept=target_accept,
-                          random_seed=random_seed, return_inferencedata=True)
+        c_prime = pm.Normal('c_prime', 0.0, 1.0)
+        outcome_condition = pm.Normal('outcome_condition', 0.0, 1.0)
+        c_by_condition = pm.Normal('c_by_condition', 0.0, 1.0)
+        b_mediator = pm.Normal('b_mediator', 0.0, 1.0)
+        b_by_condition = pm.Normal('b_by_condition', 0.0, 1.0)
 
-    return trace
+        a_subject = pm.Deterministic('a_subject', a_path + random_effects[:, RE_A])
+        c_subject = pm.Deterministic('c_prime_subject', c_prime + random_effects[:, RE_C])
+        b_subject = pm.Deterministic('b_subject', b_mediator + random_effects[:, RE_B])
+
+        sigma_m = pm.HalfNormal('sigma_m', 1.0)
+        mu_m = (mediator_intercept + random_effects[subject, RE_M_INTERCEPT]
+                + a_subject[subject] * x
+                + mediator_condition * w + a_by_condition * x * w)
+        pm.Normal('mediator_observed', mu=mu_m, sigma=sigma_m, observed=m)
+
+        sigma_y = pm.HalfNormal('sigma_y', 1.0)
+        mu_y = (outcome_intercept + random_effects[subject, RE_Y_INTERCEPT]
+                + c_subject[subject] * x
+                + outcome_condition * w + c_by_condition * x * w
+                + b_subject[subject] * m + b_by_condition * m * w)
+        pm.Normal('outcome_observed', mu=mu_y, sigma=sigma_y, observed=y)
+
+        a_acc = pm.Deterministic('a_path_acc', a_path + 0.5 * a_by_condition)
+        a_speed = pm.Deterministic('a_path_speed', a_path - 0.5 * a_by_condition)
+        b_acc = pm.Deterministic('b_path_acc', b_mediator + 0.5 * b_by_condition)
+        b_speed = pm.Deterministic('b_path_speed', b_mediator - 0.5 * b_by_condition)
+        direct_acc = pm.Deterministic('direct_acc', c_prime + 0.5 * c_by_condition)
+        direct_speed = pm.Deterministic('direct_speed', c_prime - 0.5 * c_by_condition)
+
+        indirect_acc = pm.Deterministic('indirect_acc', a_acc * b_acc + model['cov_a_b'])
+        indirect_speed = pm.Deterministic('indirect_speed',
+                                          a_speed * b_speed + model['cov_a_b'])
+        pm.Deterministic('total_acc', direct_acc + indirect_acc)
+        pm.Deterministic('total_speed', direct_speed + indirect_speed)
+        pm.Deterministic('mod_direct', direct_acc - direct_speed)
+        pm.Deterministic('index_modmed', indirect_acc - indirect_speed)
+
+    return _sample(model, seed, draws, tune, chains, cores, target_accept)
 
 
-def summarize_moderated_mediation(trace):
-    """Grouped path table (per-condition a/b/direct/indirect/total plus the
-    moderation index) with HDI-based significance stars."""
-    var_names = [
-        'a_path_acc', 'b_path_acc', 'direct_acc', 'indirect_acc', 'total_acc',
-        'a_path_speed', 'b_path_speed', 'direct_speed', 'indirect_speed', 'total_speed',
-        'mod_direct', 'index_modmed',
-    ]
-    posterior = trace.posterior
-    rows = []
-    for var in var_names:
-        samples = posterior[var].values.flatten()
-        rows.append({
-            "parameter": var,
-            "mean": float(np.mean(samples)),
-            "hdi_95": az.hdi(samples, hdi_prob=0.95),
-            "significance": hdi_star_rating(samples),
-        })
-    return pd.DataFrame(rows)
+# ──────────────────────────────────────────────────────────────────────────────
+# Summaries and diagnostics
+# ──────────────────────────────────────────────────────────────────────────────
+def _posterior_scalar(trace, variable):
+    values = np.asarray(trace.posterior[variable]).reshape(-1)
+    lo, hi = az.hdi(values, hdi_prob=0.95)
+    return {
+        'parameter': variable,
+        'mean': float(np.mean(values)),
+        'sd': float(np.std(values, ddof=1)),
+        'hdi_2.5%': float(lo),
+        'hdi_97.5%': float(hi),
+        'r_hat': float(np.nanmax(np.asarray(az.rhat(trace, var_names=[variable]).to_array()))),
+        'ess_bulk': float(np.nanmin(np.asarray(
+            az.ess(trace, var_names=[variable], method='bulk').to_array()))),
+        'ess_tail': float(np.nanmin(np.asarray(
+            az.ess(trace, var_names=[variable], method='tail').to_array()))),
+        'stars': hdi_star_rating(values),
+        'p_gt_zero': float(np.mean(values > 0)),
+    }
+
+
+def summarize_mediation(trace, variables=None):
+    """Posterior mean, SD, 95% HDI, R-hat, ESS and star label per parameter."""
+    return pd.DataFrame([_posterior_scalar(trace, v)
+                         for v in (variables or STANDARD_SUMMARY_VARS)])
+
+
+def summarize_moderated_mediation(trace, variables=None):
+    """As ``summarize_mediation``, for the joint Experiment 2 model."""
+    return pd.DataFrame([_posterior_scalar(trace, v)
+                         for v in (variables or MODERATED_SUMMARY_VARS)])
+
+
+def diagnose(trace, summary, label=''):
+    """Convergence audit. Returns (status, issues); status is 'OK' or 'CHECK'.
+
+    A 'CHECK' does not automatically invalidate a result, but it must be looked
+    at before the number is reported.
+    """
+    stats = trace.sample_stats
+    divergences = int(np.asarray(stats['diverging']).sum())
+    bfmi = np.asarray(az.bfmi(trace), dtype=float)
+    if 'reached_max_treedepth' in stats:
+        depth_hits = int(np.asarray(stats['reached_max_treedepth']).sum())
+    elif 'tree_depth' in stats:
+        depths = np.asarray(stats['tree_depth'])
+        depth_hits = int(np.sum(depths == depths.max())) if depths.max() >= 10 else 0
+    else:
+        depth_hits = -1
+
+    issues = []
+    if divergences:
+        issues.append(f'{divergences} divergences')
+    if summary['r_hat'].max() > 1.01:
+        issues.append(f"max R-hat {summary['r_hat'].max():.3f}")
+    if summary['ess_bulk'].min() < 400:
+        issues.append(f"min bulk ESS {summary['ess_bulk'].min():.0f}")
+    if summary['ess_tail'].min() < 400:
+        issues.append(f"min tail ESS {summary['ess_tail'].min():.0f}")
+    if np.nanmin(bfmi) < 0.30:
+        issues.append(f'min BFMI {np.nanmin(bfmi):.3f}')
+    if depth_hits > 0:
+        issues.append(f'{depth_hits} maximum-tree-depth hits')
+    corr_rows = summary.loc[summary['parameter'].str.startswith('corr_'), 'mean']
+    if len(corr_rows) and corr_rows.abs().max() > 0.95:
+        issues.append(f'random-effect correlation |r| = {corr_rows.abs().max():.3f}')
+
+    status = 'OK' if not issues else 'CHECK'
+    print(f'[{status}] {label or "mediation"}'
+          + (f' -- {"; ".join(issues)}' if issues else ''))
+    return status, issues

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data and weights downloaded separately (see README)
+weights/
+weights_meta/
+data/model_data/
+data/human_data/*_aggregated.csv
+data/MNIST/
+
+# Generated figures and tables
+*.pdf
+*.tiff
+figures_out/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

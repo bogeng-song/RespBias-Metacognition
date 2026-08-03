@@ -157,15 +157,25 @@ def fit_interaction_mixedlm(df, formula, bias_var='FAR_z', group_col='subject_id
     df_clean = df.dropna(subset=[c for c in df.columns if c in formula or c == group_col])
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        # Try several optimisers before giving up the random slope: with a
+        # singular random-effects covariance some optimisers return a finite
+        # coefficient alongside a NaN standard error, and which one succeeds
+        # varies by dataset. Dropping to a random intercept understates the SE,
+        # so it is a last resort rather than a first fallback.
         try:
             model = smf.mixedlm(formula, df_clean, groups=df_clean[group_col],
                                 re_formula=f"~ {bias_var}")
-            res = model.fit(method="lbfgs", maxiter=max_iter)
-            if res is not None and not pd.isna(res.bse).any():
-                return res, f"random intercept + random slope ({bias_var})"
+            for method in ("powell", "lbfgs", "cg", "bfgs", "nm"):
+                try:
+                    res = model.fit(method=method, maxiter=max_iter)
+                except Exception:
+                    continue
+                if res is not None and not pd.isna(res.bse).any():
+                    return res, f"random intercept + random slope ({bias_var}, {method})"
         except Exception:
             pass
-        # Fallback: random intercept only.
+        # Fallback: random intercept only. The SE is understated relative to a
+        # random-slope fit, so report the structure that was actually used.
         model = smf.mixedlm(formula, df_clean, groups=df_clean[group_col])
         res = model.fit(method="lbfgs", maxiter=max_iter)
         return res, "random intercept only"

@@ -1,387 +1,521 @@
 """
 simulation.py
-Generative multi-alternative Signal Detection Theory (SDT) simulation of raw vs.
-bias-aware confidence readouts.
+Multi-alternative SDT simulation of bias-blind versus bias-aware confidence.
 
-This is the simulation behind manuscript Figure 1 (and the robustness grid in
-Supplementary Figure 1). It clarifies the qualitative prediction that motivates
-the empirical analyses:
+THE MODEL
+---------
+On each trial an observer sees one of K alternatives. Evidence for every
+alternative is drawn from a unit normal, with the true alternative's mean raised
+by ``mu``. Each observer also carries a fixed, mean-centred response-bias vector
+``beta ~ N(0, sigma_b^2)`` that is added to the evidence before the choice:
 
-    * If confidence is read out from the *biased* decision variable (a "blind"
-      observer that ignores its own response tendencies), then, after controlling
-      for accuracy, response bias (FAR) is POSITIVELY related to confidence.
-    * If confidence is read out after subtracting the observer's own response-bias
-      vector (a "bias-aware" observer that self-monitors), then the accuracy-
-      controlled FAR coefficient becomes NEGATIVE.
+    decision variable   = x + beta          -> the response (argmax)
+    confidence evidence = x + beta - alpha*beta
 
-The bias-aware readout also yields higher metacognitive sensitivity (the
-within-observer confidence-accuracy correlation, Phi).
+``alpha`` is the BIAS-CORRECTION STRENGTH and is the only manipulated quantity:
 
-Model
------
-For each choice-set size K (4 or 8) we simulate ``n_subj`` observers of
-``n_trial`` trials each:
+    alpha = 0   confidence uses the same biased evidence that drove the choice
+                -> BIAS-BLIND confidence
+    alpha = 1   confidence removes the bias vector entirely
+                -> fully BIAS-AWARE confidence
 
-    * The true category on each trial is drawn uniformly from the K options.
-    * Evidence for each option is x ~ N(0, 1), with the true category boosted by a
-      signal-strength mu.  mu is calibrated per K (bisection search) so that the
-      two choice-set sizes are matched at ~63% accuracy.
-    * Each observer has a fixed, mean-centred response-bias vector
-      beta ~ N(0, sigma_bias), added to the evidence before choice, so the CHOICE
-      is always biased.
-    * The decision variable is dv = x + beta and the choice is argmax(dv).
-    * Confidence is the top-two difference of the z-scored evidence, plus Gaussian
-      metacognitive noise (conf_noise):
-          blind : top2diff(dv,        choice) + noise
-          aware : top2diff(dv - beta, choice) + noise
+Because ``beta`` enters the decision variable regardless of ``alpha``, the
+observer's choices and accuracy are identical across the whole sweep. Only the
+confidence readout changes, which is what isolates the effect of correction.
 
-We then aggregate to the (observer x category) level, compute FAR, accuracy, and
-mean confidence per category, and fit the accuracy-controlled bias->confidence
-regression.
+Confidence itself is the top-2 evidence gap: the chosen alternative's evidence
+minus the best of the remaining alternatives. The runner-up is RE-SELECTED
+inside whichever evidence space is used, so a bias-corrected readout compares
+the chosen alternative against the best non-chosen alternative *in corrected
+space* -- generally a different alternative from the biased-space runner-up.
 
-This is a direct port of the project's ``ncr_data_simulation`` notebook.
+WHAT IT PREDICTS (manuscript Figure 2)
+--------------------------------------
+Regressing digit-level confidence on digit-level FAR while controlling for
+digit-level accuracy gives a FAR coefficient whose SIGN is a signature of the
+readout: positive under bias-blind confidence, becoming negative as correction
+strengthens. Metacognitive sensitivity (Phi, the within-observer correlation
+between confidence and accuracy) increases with alpha.
+
+CALIBRATION
+-----------
+``sigma_b`` is pinned so the simulated spread of FAR across alternatives matches
+the empirical spread at the empirical design (200 observers x 400 trials). The
+shipped defaults come from that calibration:
+
+    4-choice  sigma_b = 0.368
+    8-choice  sigma_b = 0.446
+
+``calibrate_sigma_b`` reruns the calibration if you supply the empirical FAR
+array; it is not needed to reproduce the figure.
+
+``mu`` is calibrated per condition so OVERALL accuracy matches ``target_acc``
+(0.64, the empirical human level), so the two conditions are matched on
+performance rather than on evidence strength.
+
+KNOWN LIMITATION (stated, not modelled)
+---------------------------------------
+Every alternative has identical discriminability here, so between-alternative
+accuracy variation comes almost entirely from response bias. Simulated
+within-observer corr(FAR, accuracy) is ~0.95 (K=4) and ~0.92 (K=8), against
+~0.64 and ~0.60 in the human data, where digits also differ in intrinsic
+difficulty (38%-79% accuracy across digits in the 8-choice condition).
 
 Usage
 -----
-# Main simulation (Figure 1) — prints the table and saves a two-panel figure:
-python scripts_analysis/simulation.py --output figure1_simulation.pdf
-
-# Robustness grid over bias strength x metacognitive noise (Supp Fig 1):
-python scripts_analysis/simulation.py --sweep --output supp_fig1_sweep.pdf
+python scripts_analysis/simulation.py --output figure2_simulation.pdf
+python scripts_analysis/simulation.py --trial-level --csv supp_trial_level.csv
 """
 
 import argparse
+import warnings
 
 import numpy as np
 import pandas as pd
+import statsmodels.formula.api as smf
+from scipy.stats import pointbiserialr
 
-try:
-    from scipy.stats import pointbiserialr
-    from sklearn.metrics import roc_auc_score
-except Exception:  # pragma: no cover - optional at import time
-    pointbiserialr = None
-    roc_auc_score = None
+# ──────────────────────────────────────────────────────────────────────────────
+# Defaults (the reported design)
+# ──────────────────────────────────────────────────────────────────────────────
+DEFAULT_SIGMA_B = {4: 0.368, 8: 0.446}   # calibrated to the empirical FAR spread
+TARGET_ACC = 0.64                        # overall p(correct); empirical ~0.628
+N_SUBJ = 200                             # matches the empirical sample after exclusions
+N_TRIAL = 400                            # matches the empirical trials per observer
+CONF_NOISE = 0.0                         # late/readout noise SD on the finished confidence
+ALPHA_VALUES = np.round(np.arange(0.0, 1.0 + 1e-9, 0.1), 1)
+
+# Two nested models per alpha, mirroring the behavioural analysis (no RT in the model).
+MODEL_SPECS = {
+    'far':     ('FARz',            'FAR only'),
+    'far_acc': ('FARz + acc_hitz', 'FAR + accuracy'),
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Core generative model
+# Generative model
 # ──────────────────────────────────────────────────────────────────────────────
-def calibrate_mu(K, sigma, rng, target=0.63, n=40000):
-    """Bisection search for the signal strength ``mu`` that gives ``target``
-    accuracy, averaged over the response-bias distribution, so that different
-    choice-set sizes K are accuracy-matched."""
+def calibrate_mu(K, sigma_b, rng, target=TARGET_ACC, n_subj=400, n_per=500, n_iter=40):
+    """Bisect ``mu`` so overall p(correct) equals ``target`` under the same bias structure."""
     lo, hi = 0.1, 7.0
-    for _ in range(45):
+    ii = np.arange(n_subj)[:, None]
+    jj = np.arange(n_per)[None, :]
+    for _ in range(n_iter):
         mu = 0.5 * (lo + hi)
-        stim = rng.integers(0, K, n)
-        x = rng.standard_normal((n, K))
-        x[np.arange(n), stim] += mu
-        b = rng.standard_normal((n, K)) * sigma
-        b -= b.mean(1, keepdims=True)
-        acc = ((x + b).argmax(1) == stim).mean()
+        beta = rng.standard_normal((n_subj, 1, K)) * sigma_b
+        beta -= beta.mean(2, keepdims=True)
+        stim = rng.integers(0, K, (n_subj, n_per))
+        x = rng.standard_normal((n_subj, n_per, K))
+        x[ii, jj, stim] += mu
+        acc = ((x + beta).argmax(2) == stim).mean()
         lo, hi = (mu, hi) if acc < target else (lo, mu)
     return 0.5 * (lo + hi)
 
 
+def alpha_corrected_evidence(x, beta, alpha):
+    """Evidence entering the confidence readout: ``x + beta - alpha * beta``."""
+    alpha = float(alpha)
+    if not 0.0 <= alpha <= 1.0:
+        raise ValueError(f'alpha must lie in [0, 1], got {alpha}')
+    return x + beta - alpha * beta
+
+
 def top2diff(v, choice):
-    """Balance-of-evidence confidence: how far the CHOSEN option's z-scored
-    evidence sits above its strongest competitor. When the chosen option is the
-    argmax of ``v`` (the bias-blind case) this is the usual top1 - top2 >= 0;
-    when it is not (a bias-driven choice judged on de-biased evidence) it can be
-    negative."""
+    """Chosen alternative's evidence minus the best of the REMAINING alternatives.
+
+    The runner-up is re-selected inside the evidence space of ``v``, so a
+    bias-corrected readout may compare against a different alternative than the
+    biased readout would. No per-trial normalisation is applied.
+    """
     n = len(choice)
-    z = (v - v.mean(1, keepdims=True)) / (v.std(1, keepdims=True) + 1e-8)
-    z_chosen = z[np.arange(n), choice]
-    z_rest = z.copy()
-    z_rest[np.arange(n), choice] = -np.inf
-    return z_chosen - z_rest.max(1)
+    chosen = v[np.arange(n), choice]
+    rest = v.copy()
+    rest[np.arange(n), choice] = -np.inf
+    return chosen - rest.max(1)
 
 
-def gen_subject(K, mu, sigma, n, conf_noise, rng):
-    """One observer: a fixed standing bias ``beta``, ``n`` SDT trials, and two
-    confidence strategies that differ ONLY in whether the observer removes its
-    own bias before reading the top-two difference.
+def generate_observer(K, mu, sigma_b, n_trials, conf_noise, rng, alphas=ALPHA_VALUES):
+    """Simulate one observer. Returns (stim, choice, correct, {alpha: confidence}).
 
-    Returns (stim, choice, correct, conf_blind, conf_aware).
+    The metacognitive noise is LATE (readout) noise: one scalar per trial, added
+    to the finished confidence and SHARED across alpha values (common random
+    numbers), so the alpha trajectory isolates the correction manipulation and
+    cannot change the choice, the runner-up, or any FAR quantity.
     """
-    beta = rng.standard_normal(K) * sigma
-    beta -= beta.mean()                                    # standing response bias
-    stim = rng.integers(0, K, n)
-    x = rng.standard_normal((n, K))
-    x[np.arange(n), stim] += mu                            # true stimulus evidence
-    dv = x + beta                                          # biased decision variable
-    choice = dv.argmax(1)                                  # choice is ALWAYS biased
-    mnoise = rng.standard_normal(n) * conf_noise           # shared metacognitive noise
-    conf_blind = top2diff(dv, choice) + mnoise             # ignores its own bias
-    conf_aware = top2diff(dv - beta, choice) + mnoise      # accounts for its own bias
+    beta = rng.standard_normal(K) * sigma_b
+    beta -= beta.mean()
+    stim = rng.integers(0, K, n_trials)
+    x = rng.standard_normal((n_trials, K))
+    x[np.arange(n_trials), stim] += mu
+
+    choice = (x + beta).argmax(1)          # alpha changes confidence, never the choice
     correct = (choice == stim).astype(int)
-    return stim, choice, correct, conf_blind, conf_aware
+
+    late_noise = rng.standard_normal(n_trials) * conf_noise
+    confidence = {}
+    for alpha in np.asarray(alphas, dtype=float):
+        evidence = alpha_corrected_evidence(x, beta, alpha)
+        confidence[float(alpha)] = top2diff(evidence, choice) + late_noise
+    return stim, choice, correct, confidence
 
 
-def subj_rows(stim, ch, cor, conf, K, sid):
-    """Aggregate one observer's trials to the (observer x category) level and
-    z-score FAR / accuracy / confidence within the observer."""
-    r = []
+def validate_alpha_endpoints():
+    """Algebraic check: alpha=0 leaves the bias in, alpha=1 removes it exactly."""
+    rng = np.random.default_rng(20250721)
+    x = rng.normal(size=(20, 4))
+    beta = rng.normal(size=4)
+    beta -= beta.mean()
+    assert np.allclose(alpha_corrected_evidence(x, beta, 0.0), x + beta)
+    assert np.allclose(alpha_corrected_evidence(x, beta, 1.0), x)
+    return True
+
+
+def observer_far(stim, choice, K):
+    """FAR per alternative: P(resp = k | stim != k), with the half-count correction."""
+    far = np.empty(K)
     for k in range(K):
-        ck = ch == k
-        nk = stim != k
-        ik = stim == k
-        if ik.sum() and ck.sum():
-            r.append((sid, (ck & nk).sum() / nk.sum(), cor[ik].mean(), conf[ck].mean()))
-    t = pd.DataFrame(r, columns=["sid", "FAR", "acc", "conf"])
-    for c in ["FAR", "acc", "conf"]:
-        sd = t[c].std()
-        t[c + "z"] = (t[c] - t[c].mean()) / sd if sd > 0 else 0.0
-    return t
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Estimators
-# ──────────────────────────────────────────────────────────────────────────────
-def far_coef(df, control_accuracy):
-    """OLS FAR coefficient predicting confidence, optionally controlling for
-    accuracy. Pooled across observers (the sweep uses this fast estimator)."""
-    if control_accuracy:
-        X = np.c_[np.ones(len(df)), df["FARz"], df["accz"]]
-    else:
-        X = np.c_[np.ones(len(df)), df["FARz"]]
-    return np.linalg.lstsq(X, df["confz"].values, rcond=None)[0][1]
-
-
-def boot_ci(df, control_accuracy, rng, nb=2000):
-    """Subject-level (cluster) bootstrap 95% CI for the FAR coefficient."""
-    sids = df["sid"].unique()
-    est = []
-    for _ in range(nb):
-        pick = rng.choice(sids, len(sids), replace=True)
-        est.append(far_coef(pd.concat([df[df.sid == s] for s in pick]), control_accuracy))
-    return tuple(np.percentile(est, [2.5, 97.5]))
-
-
-def mixed_far_coef(df, control_accuracy):
-    """Mixed-effects FAR coefficient (random intercept + random FAR slope),
-    matching the empirical human/ANN regressions. Falls back across optimizers.
-    Returns (coef, lo, hi) or (nan, nan, nan) if every optimizer fails."""
-    import statsmodels.formula.api as smf
-
-    formula = "confz ~ FARz + accz" if control_accuracy else "confz ~ FARz"
-    for meth in ["lbfgs", "bfgs", "cg", "powell", "nm"]:
-        try:
-            m = smf.mixedlm(formula, df, groups=df["sid"], re_formula="~FARz").fit(method=meth)
-            ci = m.conf_int().loc["FARz"]
-            if np.isfinite(m.params["FARz"]) and np.isfinite(ci[0]):
-                return float(m.params["FARz"]), float(ci[0]), float(ci[1])
-        except Exception:
+        notk = stim != k
+        n_noise = float(notk.sum())
+        count = float(((choice == k) & notk).sum())
+        if n_noise == 0:
+            far[k] = np.nan
             continue
-    return np.nan, np.nan, np.nan
-
-
-def phi(conf, correct):
-    """Metacognitive sensitivity: within-observer point-biserial correlation
-    between trial-level confidence and correctness (Kornell et al., 2007)."""
-    if pointbiserialr is None:
-        raise ImportError("scipy is required for Phi (metacognitive sensitivity)")
-    return np.nan if len(np.unique(correct)) < 2 else pointbiserialr(correct, conf)[0]
+        if count == 0.0:
+            count = 0.5
+        elif count == n_noise:
+            count = n_noise - 0.5
+        far[k] = count / n_noise
+    return far
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Top-level drivers
+# Digit-level aggregation -- matches the human pipeline exactly
 # ──────────────────────────────────────────────────────────────────────────────
-def run_simulation(k_list=(4, 8), n_subj=200, n_trial=1600, sigma_bias=0.5,
-                   conf_noise=1.2, target_acc=0.63, seed=1, n_boot=2000,
-                   use_mixed=False):
-    """Run the main simulation for every K in ``k_list``.
+def digit_level_table(stim, choice, correct, confidence, K, sid):
+    """One row per alternative, with the same conditioning as the human arrays.
 
-    Returns a dict keyed by K with the accuracy-controlled FAR coefficient for
-    the blind and bias-aware readouts (``B_ctrl`` / ``A_ctrl``), their bootstrap
-    CIs, and the metacognitive-sensitivity summaries (Phi and AUROC2).
+        FAR     = P(resp = k | stim != k), half-count corrected
+        acc_hit = P(correct | stim = k)
+        conf    = E(confidence | stim = k)
+
+    Confidence is keyed by STIMULUS, not by response, because the empirical
+    pipeline pairs a response-based FAR with a stimulus-based confidence. Every
+    alternative is kept, matching the human arrays which contain all K digits for
+    every participant.
     """
+    far = observer_far(stim, choice, K)
+    rows = []
+    for k in range(K):
+        stimk = stim == k
+        if stimk.sum() == 0 or np.isnan(far[k]):
+            continue
+        rows.append((sid, far[k], correct[stimk].mean(), confidence[stimk].mean()))
+    return pd.DataFrame(rows, columns=['sid', 'FAR', 'acc_hit', 'conf'])
+
+
+def add_global_z(df, columns=('FAR', 'acc_hit', 'conf')):
+    """Z-score each column globally, across all observers x alternatives.
+
+    Matches the human pipeline, which applies sklearn's StandardScaler to the
+    whole column rather than within observer; StandardScaler divides by the
+    population SD, hence ddof=0.
+    """
+    out = df.copy()
+    for column in columns:
+        sd = out[column].std(ddof=0)
+        out[column + 'z'] = (out[column] - out[column].mean()) / sd if sd > 0 else 0.0
+    return out
+
+
+def phi(confidence, correct):
+    """Metacognitive sensitivity: within-observer confidence-accuracy correlation.
+
+    Point-biserial r, which for a binary variable is identical to Pearson's r.
+    """
+    if len(np.unique(correct)) < 2 or np.std(confidence) == 0:
+        return np.nan
+    return float(pointbiserialr(correct, confidence)[0])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Estimator -- the same specification as the empirical regressions
+# ──────────────────────────────────────────────────────────────────────────────
+def mixed_far_coef(df, rhs, group='sid', target='FARz'):
+    """Mixed model ``confz ~ rhs`` returning the target term's (coef, lo, hi, se, z, p).
+
+    Random intercept + random slope on the target, matching the human
+    specification, with the same fallback ladder: if the random slope is not
+    estimable the fit degrades to a random intercept and says so, because the
+    intercept-only SE is understated relative to a random-slope fit.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        for method in ('powell', 'lbfgs', 'cg', 'bfgs', 'nm'):
+            try:
+                m = smf.mixedlm(f'confz ~ {rhs}', df, groups=df[group],
+                                re_formula=f'~ {target}').fit(method=method)
+                se = float(m.bse_fe[target])
+                if np.isfinite(se) and se > 0 and np.isfinite(m.params[target]):
+                    ci = m.conf_int().loc[target]
+                    return (float(m.params[target]), float(ci.iloc[0]), float(ci.iloc[1]),
+                            se, float(m.tvalues[target]), float(m.pvalues[target]))
+            except Exception:
+                continue
+        for method in ('lbfgs', 'powell', 'cg'):
+            try:
+                m = smf.mixedlm(f'confz ~ {rhs}', df, groups=df[group]).fit(method=method)
+                se = float(m.bse_fe[target])
+                if np.isfinite(se) and se > 0:
+                    ci = m.conf_int().loc[target]
+                    print('    [!] random slope not estimable -> random intercept only; '
+                          'SE is understated.')
+                    return (float(m.params[target]), float(ci.iloc[0]), float(ci.iloc[1]),
+                            se, float(m.tvalues[target]), float(m.pvalues[target]))
+            except Exception:
+                continue
+    return (np.nan,) * 6
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# The alpha sweep (Figure 2)
+# ──────────────────────────────────────────────────────────────────────────────
+def _simulate_observers(K, sigma_b, n_subj, n_trial, conf_noise, target_acc, alphas, rng,
+                        verbose=True, label=''):
+    mu = calibrate_mu(K, sigma_b, rng, target=target_acc)
+    if verbose:
+        print(f'{label}: sigma_b={sigma_b:.3f}  mu={mu:.3f}  '
+              f'({n_subj} observers x {n_trial} trials)')
+    observers = [generate_observer(K, mu, sigma_b, n_trial, conf_noise, rng, alphas)
+                 for _ in range(n_subj)]
+    return mu, observers
+
+
+def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
+                    conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
+                    alphas=ALPHA_VALUES, seed=1, verbose=True):
+    """Digit-level FAR coefficient and Phi across bias-correction strength.
+
+    Returns a tidy DataFrame with one row per (condition, alpha, nested model).
+    """
+    validate_alpha_endpoints()
+    sigma_b = dict(DEFAULT_SIGMA_B) if sigma_b is None else dict(sigma_b)
     rng = np.random.default_rng(seed)
-    results = {}
+    alphas = np.asarray(alphas, dtype=float)
+    rows = []
+
     for K in k_list:
-        mu = calibrate_mu(K, sigma_bias, rng, target=target_acc)
-        rB, rA, phiB, phiA, aucB, aucA, accs = [], [], [], [], [], [], []
-        for sid in range(n_subj):
-            stim, ch, cor, cB, cA = gen_subject(K, mu, sigma_bias, n_trial, conf_noise, rng)
-            rB.append(subj_rows(stim, ch, cor, cB, K, sid))
-            rA.append(subj_rows(stim, ch, cor, cA, K, sid))
-            phiB.append(phi(cB, cor))
-            phiA.append(phi(cA, cor))
-            if roc_auc_score is not None:
-                aucB.append(roc_auc_score(cor, cB))
-                aucA.append(roc_auc_score(cor, cA))
-            accs.append(cor.mean())
-        dB, dA = pd.concat(rB), pd.concat(rA)
+        label = f'{K}-choice'
+        sb = sigma_b[K]
+        mu, observers = _simulate_observers(K, sb, n_subj, n_trial, conf_noise, target_acc,
+                                            alphas, rng, verbose, label)
+        overall_acc = float(np.mean([o[2].mean() for o in observers]))
 
-        if use_mixed:
-            b_ctrl, b_lo, b_hi = mixed_far_coef(dB, True)
-            a_ctrl, a_lo, a_hi = mixed_far_coef(dA, True)
-            ciB, ciA = (b_lo, b_hi), (a_lo, a_hi)
-        else:
-            b_ctrl, a_ctrl = far_coef(dB, True), far_coef(dA, True)
-            ciB, ciA = boot_ci(dB, True, rng, nb=n_boot), boot_ci(dA, True, rng, nb=n_boot)
+        for alpha in alphas:
+            frames, phis = [], []
+            for sid, (stim, choice, correct, conf) in enumerate(observers):
+                frames.append(digit_level_table(stim, choice, correct,
+                                                conf[float(alpha)], K, sid))
+                phis.append(phi(conf[float(alpha)], correct))
+            df = add_global_z(pd.concat(frames, ignore_index=True))
 
-        results[K] = dict(
-            mu=mu, acc=float(np.mean(accs)),
-            B_ctrl=b_ctrl, A_ctrl=a_ctrl, ciB=ciB, ciA=ciA,
-            phiB=float(np.nanmean(phiB)), phiA=float(np.nanmean(phiA)),
-            aucB=float(np.mean(aucB)) if aucB else np.nan,
-            aucA=float(np.mean(aucA)) if aucA else np.nan,
-        )
-    return results
+            for key, (rhs, model_label) in MODEL_SPECS.items():
+                coef, lo, hi, se, z, p = mixed_far_coef(df, rhs)
+                rows.append({'condition': label, 'K': K, 'alpha': float(alpha),
+                             'model': model_label, 'model_key': key,
+                             'coef': coef, 'ci_low': lo, 'ci_high': hi,
+                             'se': se, 'z': z, 'p': p,
+                             'phi': float(np.nanmean(phis)),
+                             'phi_sem': float(np.nanstd(phis, ddof=1) / np.sqrt(len(phis))),
+                             'overall_accuracy': overall_acc,
+                             'n_subj': n_subj, 'n_trial': n_trial, 'sigma_b': sb, 'mu': mu})
+            if verbose:
+                last = rows[-1]
+                print(f'  alpha={alpha:.1f}  FAR|accuracy beta={last["coef"]:+.4f} '
+                      f'[{last["ci_low"]:+.4f}, {last["ci_high"]:+.4f}]  '
+                      f'Phi={last["phi"]:.3f}')
+    return pd.DataFrame(rows)
 
 
-def run_robustness_sweep(sigma_grid=(0.4, 0.6, 0.8, 1.0, 1.2, 1.4),
-                         noise_grid=(0.0, 0.4, 0.8, 1.2, 1.6, 2.0),
-                         K=8, n_subj=100, n_trial=1200, target_acc=0.63, seed=1):
-    """Robustness grid (Supplementary Figure 1): accuracy-controlled FAR
-    coefficient for the blind and bias-aware readouts across a grid of response-
-    bias strengths (sigma) x metacognitive-noise levels. Returns
-    (blind_map, aware_map, sigma_grid, noise_grid), maps shaped (noise, sigma)."""
+def run_trial_level_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
+                                conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
+                                alphas=ALPHA_VALUES, seed=1, verbose=True):
+    """Trial-level counterpart: FAR of the CHOSEN alternative predicting trial confidence.
+
+    The digit-level analysis collapses each observer to K points; here every
+    trial is a row. FAR is computed per alternative from that observer's own
+    response frequencies (identical across alpha, since alpha never changes
+    choices) and attached to each trial by the chosen alternative.
+    """
+    validate_alpha_endpoints()
+    sigma_b = dict(DEFAULT_SIGMA_B) if sigma_b is None else dict(sigma_b)
     rng = np.random.default_rng(seed)
-    sigma_grid = list(sigma_grid)
-    noise_grid = list(noise_grid)
-    mu_for_sigma = {s: calibrate_mu(K, s, rng, target=target_acc) for s in sigma_grid}
-    blind = np.zeros((len(noise_grid), len(sigma_grid)))
-    aware = np.zeros_like(blind)
-    for i, cn in enumerate(noise_grid):
-        for j, sg in enumerate(sigma_grid):
-            mu = mu_for_sigma[sg]
-            rb, ra = [], []
-            for sid in range(n_subj):
-                stim, ch, cor, cB, cA = gen_subject(K, mu, sg, n_trial, cn, rng)
-                rb.append(subj_rows(stim, ch, cor, cB, K, sid))
-                ra.append(subj_rows(stim, ch, cor, cA, K, sid))
-            blind[i, j] = far_coef(pd.concat(rb), True)
-            aware[i, j] = far_coef(pd.concat(ra), True)
-    return blind, aware, sigma_grid, noise_grid
+    alphas = np.asarray(alphas, dtype=float)
+    rows = []
+
+    for K in k_list:
+        label = f'{K}-choice'
+        sb = sigma_b[K]
+        _, observers = _simulate_observers(K, sb, n_subj, n_trial, conf_noise, target_acc,
+                                           alphas, rng, verbose, f'{label} (trial level)')
+        far_by_observer = [observer_far(stim, choice, K) for stim, choice, _, _ in observers]
+
+        for alpha in alphas:
+            frames = []
+            for sid, (stim, choice, correct, conf) in enumerate(observers):
+                frames.append(pd.DataFrame({'sid': sid,
+                                            'FAR': far_by_observer[sid][choice],
+                                            'conf': conf[float(alpha)]}))
+            df = add_global_z(pd.concat(frames, ignore_index=True), columns=('FAR', 'conf'))
+            coef, lo, hi, se, z, p = mixed_far_coef(df, 'FARz')
+            rows.append({'condition': label, 'K': K, 'alpha': float(alpha),
+                         'coef': coef, 'ci_low': lo, 'ci_high': hi,
+                         'se': se, 'z': z, 'p': p,
+                         'n_subj': n_subj, 'n_trial': n_trial, 'sigma_b': sb})
+            if verbose:
+                print(f'  alpha={alpha:.1f}  trial-level FAR beta={coef:+.4f} '
+                      f'[{lo:+.4f}, {hi:+.4f}]')
+    return pd.DataFrame(rows)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Plotting
+# Optional: recalibrate sigma_b against an empirical FAR array
 # ──────────────────────────────────────────────────────────────────────────────
-def plot_figure1(results, output_path):
-    """Two-panel Figure 1: (A) accuracy-controlled FAR coefficient and (B)
-    metacognitive sensitivity (Phi), for blind vs. bias-aware readouts."""
+def calibrate_sigma_b(empirical_far, K, rng=None, grid=None, n_rep=10,
+                      n_subj=N_SUBJ, n_trial=N_TRIAL, target_acc=TARGET_ACC):
+    """Pick sigma_b so the simulated FAR spread matches an empirical FAR array.
+
+    ``empirical_far`` is an (n_subject x K) array of FAR = P(choose k | true != k).
+    The objective is the mean within-observer SD of FAR across alternatives, and
+    ``n_rep`` independent replications are averaged per candidate so the match is
+    not made against a single stochastic draw.
+
+    Not needed to reproduce the figure -- the calibrated values are the shipped
+    DEFAULT_SIGMA_B. Provided so the calibration is auditable.
+    """
+    rng = np.random.default_rng(2026) if rng is None else rng
+    grid = np.round(np.arange(0.20, 0.81, 0.02), 3) if grid is None else np.asarray(grid)
+    target = float(np.mean(np.std(np.asarray(empirical_far, dtype=float), axis=1, ddof=1)))
+
+    best, best_gap, best_sim = None, np.inf, np.nan
+    for sb in grid:
+        sims = []
+        for _ in range(n_rep):
+            mu = calibrate_mu(K, sb, rng, target=target_acc)
+            spreads = []
+            for _ in range(n_subj):
+                stim, choice, _, _ = generate_observer(K, mu, sb, n_trial, 0.0, rng,
+                                                       alphas=[0.0])
+                spreads.append(np.nanstd(observer_far(stim, choice, K), ddof=1))
+            sims.append(np.mean(spreads))
+        sim = float(np.mean(sims))
+        if abs(sim - target) < best_gap:
+            best, best_gap, best_sim = float(sb), abs(sim - target), sim
+    print(f'K={K}: empirical SD_FAR={target:.4f}  sigma_b*={best:.3f}  '
+          f'simulated SD_FAR={best_sim:.4f}')
+    return best
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Figure
+# ──────────────────────────────────────────────────────────────────────────────
+def plot_alpha_sweep(results, output_path=None, phi_panel=True):
+    """Figure 2: FAR coefficient across alpha for both nested models, plus Phi."""
     import matplotlib.pyplot as plt
 
-    k_list = sorted(results.keys())
-    xs, labels, colors = [], [], []
-    for i, K in enumerate(k_list):
-        base = i * 2.5
-        xs += [base, base + 1]
-        labels += [f"{K}: raw", f"{K}: bias-aware"]
-        colors += ["#cccccc", "#2f6fd0"]
+    conditions = list(dict.fromkeys(results['condition']))
+    n_panels = len(conditions) + (1 if phi_panel else 0)
+    fig, axes = plt.subplots(1, n_panels, figsize=(4.6 * n_panels, 4.0))
+    axes = np.atleast_1d(axes)
+    colors = {'far': '#4E79A7', 'far_acc': '#E15759'}
 
-    m = [v for K in k_list for v in (results[K]["B_ctrl"], results[K]["A_ctrl"])]
-    ci = [c for K in k_list for c in (results[K]["ciB"], results[K]["ciA"])]
-    err = [[m[i] - ci[i][0] for i in range(len(m))],
-           [ci[i][1] - m[i] for i in range(len(m))]]
+    for ax, condition in zip(axes, conditions):
+        sub = results[results['condition'] == condition]
+        for key, (_, label) in MODEL_SPECS.items():
+            block = sub[sub['model_key'] == key].sort_values('alpha')
+            ax.plot(block['alpha'], block['coef'], '-o', ms=4, color=colors[key], label=label)
+            ax.fill_between(block['alpha'], block['ci_low'], block['ci_high'],
+                            color=colors[key], alpha=0.18, lw=0)
+        ax.axhline(0, color='black', lw=0.9)
+        ax.set_xlabel(r'Bias correction strength $\alpha$', fontweight='bold')
+        ax.set_ylabel(r'FAR effect on confidence ($\beta$)', fontweight='bold')
+        ax.set_title(condition, fontweight='bold')
+        ax.grid(axis='y', linestyle='--', alpha=0.25)
+        ax.legend(frameon=False, fontsize=9)
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.3))
-    axes[0].bar(xs, m, yerr=err, capsize=4, width=0.8, color=colors)
-    axes[0].axhline(0, color="k", lw=.8)
-    axes[0].set_xticks(xs)
-    axes[0].set_xticklabels(labels)
-    axes[0].set_ylabel(r"Bias coefficient ($\beta$, accuracy-controlled)")
-    axes[0].set_title("A. Bias effect on confidence", loc="left", fontweight="bold")
+    if phi_panel:
+        ax = axes[-1]
+        for condition, colour in zip(conditions, ('#4E79A7', '#F28E2B')):
+            block = (results[(results['condition'] == condition) &
+                             (results['model_key'] == 'far_acc')].sort_values('alpha'))
+            ax.errorbar(block['alpha'], block['phi'], yerr=block['phi_sem'],
+                        fmt='-o', ms=4, capsize=3, color=colour, label=condition)
+        ax.set_xlabel(r'Bias correction strength $\alpha$', fontweight='bold')
+        ax.set_ylabel(r'Metacognitive sensitivity $\Phi$', fontweight='bold')
+        ax.set_title('Metacognitive sensitivity', fontweight='bold')
+        ax.grid(axis='y', linestyle='--', alpha=0.25)
+        ax.legend(frameon=False, fontsize=9)
 
-    m2 = [v for K in k_list for v in (results[K]["phiB"], results[K]["phiA"])]
-    axes[1].bar(xs, m2, width=0.8, color=colors)
-    axes[1].set_xticks(xs)
-    axes[1].set_xticklabels(labels)
-    axes[1].set_ylabel(r"Metacognitive sensitivity ($\Phi$)")
-    axes[1].set_title("B. Confidence-accuracy correspondence", loc="left", fontweight="bold")
-
-    for ax in axes:
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"Figure saved to: {output_path}")
-    return fig
-
-
-def plot_sweep(blind, aware, sigma_grid, noise_grid, output_path):
-    """Robustness grid figure (Supplementary Figure 1)."""
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.4))
-    for ax, data, ttl in [(axes[0], blind, "raw (blind)"), (axes[1], aware, "bias-aware")]:
-        im = ax.imshow(data, origin="lower", cmap="RdBu_r", vmin=-0.8, vmax=0.8, aspect="auto")
-        ax.set_xticks(range(len(sigma_grid)))
-        ax.set_xticklabels(sigma_grid)
-        ax.set_yticks(range(len(noise_grid)))
-        ax.set_yticklabels(noise_grid)
-        ax.set_xlabel("Response-bias strength (sigma)")
-        ax.set_ylabel("Metacognitive noise")
-        ax.set_title(f"Accuracy-controlled FAR coef — {ttl}")
-        for i in range(len(noise_grid)):
-            for j in range(len(sigma_grid)):
-                ax.text(j, i, f"{data[i, j]:+.2f}", ha="center", va="center", fontsize=8)
-        fig.colorbar(im, ax=ax, fraction=0.046)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"Figure saved to: {output_path}")
+    fig.tight_layout()
+    if output_path:
+        fig.savefig(output_path, bbox_inches='tight', facecolor='white')
+        print(f'Saved figure -> {output_path}')
     return fig
 
 
 def print_summary(results):
-    print("\nGenerative SDT simulation — accuracy-controlled bias->confidence coefficient")
-    print(f"{'K':>3}  {'readout':>11}  {'FAR coef [95% CI]':>26}  {'Phi':>6}  {'AUROC2':>7}")
-    for K in sorted(results):
-        r = results[K]
-        print(f"{K:>3}  {'raw/blind':>11}  "
-              f"{r['B_ctrl']:+.3f} [{r['ciB'][0]:+.3f}, {r['ciB'][1]:+.3f}]".rjust(26)
-              + f"  {r['phiB']:>6.3f}  {r['aucB']:>7.3f}")
-        print(f"{K:>3}  {'bias-aware':>11}  "
-              f"{r['A_ctrl']:+.3f} [{r['ciA'][0]:+.3f}, {r['ciA'][1]:+.3f}]".rjust(26)
-              + f"  {r['phiA']:>6.3f}  {r['aucA']:>7.3f}")
-    print(f"\nmatched accuracy ~ {results[max(results)]['acc']:.3f}\n")
+    """Endpoint summary: the sign flip and the Phi gain that Figure 2 reports."""
+    print('\n' + '=' * 78)
+    print('Bias-correction sweep: endpoints of the alpha range')
+    print('=' * 78)
+    for condition in dict.fromkeys(results['condition']):
+        sub = results[(results['condition'] == condition) & (results['model_key'] == 'far_acc')]
+        lo = sub[sub['alpha'] == sub['alpha'].min()].iloc[0]
+        hi = sub[sub['alpha'] == sub['alpha'].max()].iloc[0]
+        print(f'\n{condition}  (overall accuracy {lo["overall_accuracy"]:.3f})')
+        print(f'  alpha={lo["alpha"]:.1f} (bias-blind): FAR|accuracy beta = {lo["coef"]:+.4f} '
+              f'[{lo["ci_low"]:+.4f}, {lo["ci_high"]:+.4f}]   Phi = {lo["phi"]:.3f}')
+        print(f'  alpha={hi["alpha"]:.1f} (bias-aware): FAR|accuracy beta = {hi["coef"]:+.4f} '
+              f'[{hi["ci_low"]:+.4f}, {hi["ci_high"]:+.4f}]   Phi = {hi["phi"]:.3f}')
+        print(f'  sign flip positive -> negative: '
+              f'{"yes" if lo["coef"] > 0 > hi["coef"] else "no"}')
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CLI
-# ──────────────────────────────────────────────────────────────────────────────
 def main():
-    p = argparse.ArgumentParser(description="Generative SDT simulation (Figure 1 / Supp Fig 1).")
-    p.add_argument("--n_subj", type=int, default=200, help="Number of simulated observers per K.")
-    p.add_argument("--n_trial", type=int, default=1600, help="Trials per observer.")
-    p.add_argument("--sigma_bias", type=float, default=0.5, help="Response-bias strength.")
-    p.add_argument("--conf_noise", type=float, default=1.2, help="Metacognitive noise SD.")
-    p.add_argument("--target_acc", type=float, default=0.63, help="Accuracy-matching target.")
-    p.add_argument("--k_list", type=int, nargs="+", default=[4, 8], help="Choice-set sizes.")
-    p.add_argument("--seed", type=int, default=1)
-    p.add_argument("--n_boot", type=int, default=2000, help="Bootstrap resamples for CIs.")
-    p.add_argument("--mixed", action="store_true",
-                   help="Use mixed-effects (random slope) for the headline coefficient "
-                        "instead of pooled OLS (matches the empirical regressions).")
-    p.add_argument("--sweep", action="store_true",
-                   help="Run the response-bias x metacognitive-noise robustness grid "
-                        "(Supplementary Figure 1) instead of the main simulation.")
-    p.add_argument("--output", type=str, default=None, help="Path to save the figure (PDF/PNG).")
+    p = argparse.ArgumentParser(
+        description='Multi-alternative SDT simulation of bias-blind vs bias-aware confidence.')
+    p.add_argument('--n_subj', type=int, default=N_SUBJ)
+    p.add_argument('--n_trial', type=int, default=N_TRIAL)
+    p.add_argument('--conf_noise', type=float, default=CONF_NOISE,
+                   help='Late (readout) metacognitive noise SD.')
+    p.add_argument('--target_acc', type=float, default=TARGET_ACC)
+    p.add_argument('--k_list', type=int, nargs='+', default=[4, 8])
+    p.add_argument('--alpha_step', type=float, default=0.1)
+    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--trial-level', dest='trial_level', action='store_true',
+                   help='Run the trial-level sweep instead of the digit-level one.')
+    p.add_argument('--csv', type=str, default=None, help='Write the tidy results to CSV.')
+    p.add_argument('--output', type=str, default=None, help='Save the figure (PDF/PNG).')
     args = p.parse_args()
 
-    if args.sweep:
-        blind, aware, sig, cn = run_robustness_sweep(target_acc=args.target_acc, seed=args.seed)
-        print("Robustness sweep (accuracy-controlled FAR coefficient), K=8")
-        print("rows = metacognitive noise, cols = sigma_bias")
-        print("blind:\n", np.round(blind, 3))
-        print("aware:\n", np.round(aware, 3))
+    alphas = np.round(np.arange(0.0, 1.0 + 1e-9, args.alpha_step), 3)
+    runner = run_trial_level_alpha_sweep if args.trial_level else run_alpha_sweep
+    results = runner(k_list=tuple(args.k_list), n_subj=args.n_subj, n_trial=args.n_trial,
+                     conf_noise=args.conf_noise, target_acc=args.target_acc,
+                     alphas=alphas, seed=args.seed)
+
+    if args.csv:
+        results.to_csv(args.csv, index=False)
+        print(f'Saved results -> {args.csv}')
+    if args.trial_level:
         if args.output:
-            plot_sweep(blind, aware, sig, cn, args.output)
+            print('(--output is only produced for the digit-level sweep; '
+                  'use --csv for the trial-level results)')
     else:
-        results = run_simulation(
-            k_list=tuple(args.k_list), n_subj=args.n_subj, n_trial=args.n_trial,
-            sigma_bias=args.sigma_bias, conf_noise=args.conf_noise,
-            target_acc=args.target_acc, seed=args.seed, n_boot=args.n_boot,
-            use_mixed=args.mixed,
-        )
         print_summary(results)
         if args.output:
-            plot_figure1(results, args.output)
+            plot_alpha_sweep(results, args.output)
+    return results
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -2,17 +2,13 @@
 train_metacognitive.py
 Train a learned metacognitive head on top of a FROZEN base classifier.
 
-Three learned modules are available (``--mode``); all freeze the base classifier
-and train only the metacognitive readout:
+Two modules are available (``--mode``); both freeze the base classifier and
+train only the metacognitive readout, so the perceptual decisions are identical:
 
-    fixed_base   MAIN model (Fig 7): correctness-monitoring head on the frozen
-                 penultimate features + top-2 margin + entropy.
-    chen         Chen-style white-box correctness model (Supp 6.1): linear probes
-                 on intermediate layers + an MLP meta-model.
-    dual         Dual-output correctness + auxiliary false-response model (Supp 6.2).
-
-A fourth, feedback-free module (no training, no labels) is in
-``scripts_ann/distribution_shift.py``.
+    logit_only   MAIN model (Figure 6): correctness-monitoring head that sees
+                 ONLY the frozen classifier's C raw final-layer logits.
+    pen_only     SUPPLEMENTARY model: identical except the head sees ONLY the
+                 penultimate-layer representation.
 
 Base weights (from ``scripts_ann/train.py``) are expected at
 ``<base_dir>/<model>-224-<instance>-final.pt``. The trained head is saved to
@@ -22,12 +18,12 @@ the frozen backbone).
 Usage
 -----
 python scripts_ann/train_metacognitive.py \
-    --model alexnet --instance 0 --mode fixed_base \
+    --model alexnet --instance 0 --mode logit_only \
     --noise_level 1.05 \
     --base_dir ./weights/alexnet/ --save_dir ./weights_meta/alexnet/
 
-# Repeat for --mode chen and --mode dual, and for resnet18 / vgg19 using their
-# respective noise levels (see DEFAULT_NOISE below).
+# Repeat for --mode pen_only, and for resnet18 / vgg19 using their respective
+# noise levels (see DEFAULT_NOISE below).
 """
 
 import argparse
@@ -85,7 +81,7 @@ def main():
     parser = argparse.ArgumentParser(description="Train a learned metacognitive head on a frozen classifier.")
     parser.add_argument('--model', choices=['alexnet', 'resnet18', 'vgg19'], required=True)
     parser.add_argument('--instance', type=int, required=True, help='Instance number (0-59).')
-    parser.add_argument('--mode', choices=list(VALID_MODES), default='fixed_base')
+    parser.add_argument('--mode', choices=list(VALID_MODES), default='logit_only')
     parser.add_argument('--noise_level', type=float, default=None,
                         help='Gaussian noise SD (defaults to the architecture-specific value).')
     parser.add_argument('--base_dir', type=str, required=True,
@@ -94,8 +90,6 @@ def main():
                         help='Directory to save the trained metacognitive head.')
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--batch_size', type=int, default=None)
-    parser.add_argument('--bias_lambda', type=float, default=1.0, help='Dual-output aux loss weight.')
-    parser.add_argument('--lambda_probe', type=float, default=0.3, help='Chen-style probe CE weight.')
     args = parser.parse_args()
 
     noise_level = args.noise_level if args.noise_level is not None else DEFAULT_NOISE[args.model]
@@ -108,8 +102,7 @@ def main():
     if not os.path.exists(base_ckpt):
         raise FileNotFoundError(f"Base checkpoint not found: {base_ckpt}")
 
-    model = LitMetaModel(arch=args.model, mode=args.mode, noise_level=noise_level,
-                         bias_lambda=args.bias_lambda, lambda_probe=args.lambda_probe)
+    model = LitMetaModel(arch=args.model, mode=args.mode, noise_level=noise_level)
     model.load_base_weights(base_ckpt)
     print(f"Loaded frozen base classifier from {base_ckpt}")
 
