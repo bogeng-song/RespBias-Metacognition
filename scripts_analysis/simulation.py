@@ -39,19 +39,25 @@ between confidence and accuracy) increases with alpha.
 
 CALIBRATION
 -----------
-``sigma_b`` is pinned so the simulated spread of FAR across alternatives matches
-the empirical spread at the empirical design (200 observers x 400 trials). The
-shipped defaults come from that calibration:
+``sigma_b`` is solved so the simulated within-observer dispersion of FAR across
+alternatives matches the empirical dispersion (.0704 for 4-choice, .0433 for
+8-choice), by bounded Brent root search over [0.001, 1.5] to tolerance 1e-4. At
+every candidate, ``mu`` is recalibrated and the objective is averaged over 10
+independently generated full designs. The solved values are the shipped defaults:
 
     4-choice  sigma_b = 0.368
     8-choice  sigma_b = 0.446
 
-``calibrate_sigma_b`` reruns the calibration if you supply the empirical FAR
-array; it is not needed to reproduce the figure.
+``calibrate_sigma_b`` re-runs that search; it is not needed to reproduce the
+figure, only to audit the calibration.
 
 ``mu`` is calibrated per condition so OVERALL accuracy matches ``target_acc``
-(0.64, the empirical human level), so the two conditions are matched on
+(0.64, approximating the empirical .63), so the two conditions are matched on
 performance rather than on evidence strength.
+
+``no_bias_benchmark`` is the separate null used with the behavioural checks: the
+response-bias vector is fixed at zero, giving the FAR dispersion expected from
+finite sampling alone in an observer with no stable response preference.
 
 KNOWN LIMITATION (stated, not modelled)
 ---------------------------------------
@@ -61,10 +67,14 @@ within-observer corr(FAR, accuracy) is ~0.95 (K=4) and ~0.92 (K=8), against
 ~0.64 and ~0.60 in the human data, where digits also differ in intrinsic
 difficulty (38%-79% accuracy across digits in the 8-choice condition).
 
+Reported seeds: generation 1, calibration 2026, trial-level analysis 20250722.
+
 Usage
 -----
 python scripts_analysis/simulation.py --output figure2_simulation.pdf
 python scripts_analysis/simulation.py --trial-level --csv supp_trial_level.csv
+python scripts_analysis/simulation.py --no-bias-benchmark --csv null_far.csv
+python scripts_analysis/simulation.py --calibrate          # re-solve sigma_b (slow)
 """
 
 import argparse
@@ -73,6 +83,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import statsmodels.formula.api as smf
+from scipy.optimize import brentq
 from scipy.stats import pointbiserialr
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -84,6 +95,18 @@ N_SUBJ = 200                             # matches the empirical sample after ex
 N_TRIAL = 400                            # matches the empirical trials per observer
 CONF_NOISE = 0.0                         # late/readout noise SD on the finished confidence
 ALPHA_VALUES = np.round(np.arange(0.0, 1.0 + 1e-9, 0.1), 1)
+
+# Empirical within-observer FAR dispersion the calibration targets (mean across
+# observers of the SD of FAR across alternatives).
+EMPIRICAL_FAR_SD = {4: 0.0704, 8: 0.0433}
+
+# Fixed seeds for the reported runs: generation, calibration, trial-level analysis.
+SEED_GENERATION = 1
+SEED_CALIBRATION = 2026
+SEED_TRIAL_LEVEL = 20250722
+
+N_BOOT = 2000          # observer-level bootstrap resamples for the Phi CI
+N_NULL_OBSERVERS = 2000   # null observers per choice-set size for the no-bias benchmark
 
 # Two nested models per alpha, mirroring the behavioural analysis (no RT in the model).
 MODEL_SPECS = {
@@ -227,6 +250,35 @@ def add_global_z(df, columns=('FAR', 'acc_hit', 'conf')):
     return out
 
 
+def bootstrap_ci(values, n_boot=N_BOOT, seed=0, alpha=0.05):
+    """Percentile CI for the mean, resampling OBSERVERS (not trials)."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) < 2:
+        return (np.nan, np.nan)
+    rng = np.random.default_rng(seed)
+    draws = values[rng.integers(0, len(values), (n_boot, len(values)))].mean(axis=1)
+    return (float(np.percentile(draws, 100 * alpha / 2)),
+            float(np.percentile(draws, 100 * (1 - alpha / 2))))
+
+
+def add_within_subject_z(df, columns=('FAR', 'conf'), group='sid'):
+    """Z-score each column WITHIN observer.
+
+    The trial-level analysis standardises within observer, unlike the
+    alternative-level analysis which standardises across all observer-by-
+    alternative rows. Within-observer scaling removes between-observer
+    differences in confidence scale, which matter far more at the trial level
+    where every observer contributes hundreds of rows.
+    """
+    out = df.copy()
+    for column in columns:
+        grouped = out.groupby(group)[column]
+        sd = grouped.transform('std')
+        out[column + 'z'] = np.where(sd > 0, (out[column] - grouped.transform('mean')) / sd, 0.0)
+    return out
+
+
 def phi(confidence, correct):
     """Metacognitive sensitivity: within-observer confidence-accuracy correlation.
 
@@ -235,6 +287,19 @@ def phi(confidence, correct):
     if len(np.unique(correct)) < 2 or np.std(confidence) == 0:
         return np.nan
     return float(pointbiserialr(correct, confidence)[0])
+
+
+def far_accuracy_vif(df, columns=('FARz', 'acc_hitz')):
+    """VIF between FAR and accuracy in the adjusted model.
+
+    With two predictors both VIFs are equal and reduce to 1 / (1 - r^2). This is
+    reported per alpha because the whole point of the adjusted model is that FAR
+    and accuracy are correlated by construction -- they are computed from the
+    same finite trials and driven by the same per-alternative bias.
+    """
+    x, y = df[columns[0]].to_numpy(dtype=float), df[columns[1]].to_numpy(dtype=float)
+    r = float(np.corrcoef(x, y)[0, 1])
+    return 1.0 / (1.0 - r ** 2), r
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -292,7 +357,8 @@ def _simulate_observers(K, sigma_b, n_subj, n_trial, conf_noise, target_acc, alp
 
 def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
                     conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
-                    alphas=ALPHA_VALUES, seed=1, verbose=True):
+                    alphas=ALPHA_VALUES, seed=SEED_GENERATION, n_boot=N_BOOT,
+                    verbose=True):
     """Digit-level FAR coefficient and Phi across bias-correction strength.
 
     Returns a tidy DataFrame with one row per (condition, alpha, nested model).
@@ -318,6 +384,10 @@ def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
                 phis.append(phi(conf[float(alpha)], correct))
             df = add_global_z(pd.concat(frames, ignore_index=True))
 
+            # Phi CI from an OBSERVER-level bootstrap; VIF reported per alpha
+            # because FAR and accuracy are correlated by construction.
+            phi_lo, phi_hi = bootstrap_ci(phis, n_boot=n_boot, seed=seed)
+            vif, r_far_acc = far_accuracy_vif(df)
             for key, (rhs, model_label) in MODEL_SPECS.items():
                 coef, lo, hi, se, z, p = mixed_far_coef(df, rhs)
                 rows.append({'condition': label, 'K': K, 'alpha': float(alpha),
@@ -325,26 +395,35 @@ def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
                              'coef': coef, 'ci_low': lo, 'ci_high': hi,
                              'se': se, 'z': z, 'p': p,
                              'phi': float(np.nanmean(phis)),
+                             'phi_ci_low': phi_lo, 'phi_ci_high': phi_hi,
                              'phi_sem': float(np.nanstd(phis, ddof=1) / np.sqrt(len(phis))),
+                             'vif_far_accuracy': vif, 'r_far_accuracy': r_far_acc,
                              'overall_accuracy': overall_acc,
                              'n_subj': n_subj, 'n_trial': n_trial, 'sigma_b': sb, 'mu': mu})
             if verbose:
                 last = rows[-1]
                 print(f'  alpha={alpha:.1f}  FAR|accuracy beta={last["coef"]:+.4f} '
                       f'[{last["ci_low"]:+.4f}, {last["ci_high"]:+.4f}]  '
-                      f'Phi={last["phi"]:.3f}')
+                      f'Phi={last["phi"]:.3f} '
+                      f'[{last["phi_ci_low"]:.3f}, {last["phi_ci_high"]:.3f}]  '
+                      f'VIF={last["vif_far_accuracy"]:.2f}')
     return pd.DataFrame(rows)
 
 
 def run_trial_level_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
                                 conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
-                                alphas=ALPHA_VALUES, seed=1, verbose=True):
+                                alphas=ALPHA_VALUES, seed=SEED_TRIAL_LEVEL, verbose=True):
     """Trial-level counterpart: FAR of the CHOSEN alternative predicting trial confidence.
 
     The digit-level analysis collapses each observer to K points; here every
     trial is a row. FAR is computed per alternative from that observer's own
     response frequencies (identical across alpha, since alpha never changes
     choices) and attached to each trial by the chosen alternative.
+
+    FAR and confidence are standardised WITHIN observer here, unlike the
+    alternative-level analysis which standardises globally: at the trial level
+    every observer contributes hundreds of rows, so between-observer differences
+    in confidence scale would otherwise dominate.
     """
     validate_alpha_endpoints()
     sigma_b = dict(DEFAULT_SIGMA_B) if sigma_b is None else dict(sigma_b)
@@ -365,7 +444,8 @@ def run_trial_level_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, s
                 frames.append(pd.DataFrame({'sid': sid,
                                             'FAR': far_by_observer[sid][choice],
                                             'conf': conf[float(alpha)]}))
-            df = add_global_z(pd.concat(frames, ignore_index=True), columns=('FAR', 'conf'))
+            df = add_within_subject_z(pd.concat(frames, ignore_index=True),
+                                      columns=('FAR', 'conf'))
             coef, lo, hi, se, z, p = mixed_far_coef(df, 'FARz')
             rows.append({'condition': label, 'K': K, 'alpha': float(alpha),
                          'coef': coef, 'ci_low': lo, 'ci_high': hi,
@@ -380,39 +460,92 @@ def run_trial_level_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, s
 # ──────────────────────────────────────────────────────────────────────────────
 # Optional: recalibrate sigma_b against an empirical FAR array
 # ──────────────────────────────────────────────────────────────────────────────
-def calibrate_sigma_b(empirical_far, K, rng=None, grid=None, n_rep=10,
-                      n_subj=N_SUBJ, n_trial=N_TRIAL, target_acc=TARGET_ACC):
-    """Pick sigma_b so the simulated FAR spread matches an empirical FAR array.
+def simulated_far_dispersion(K, sigma_b, rng, n_subj=N_SUBJ, n_trial=N_TRIAL,
+                             target_acc=TARGET_ACC, n_rep=10):
+    """Mean within-observer SD of FAR across alternatives, at this sigma_b.
 
-    ``empirical_far`` is an (n_subject x K) array of FAR = P(choose k | true != k).
-    The objective is the mean within-observer SD of FAR across alternatives, and
-    ``n_rep`` independent replications are averaged per candidate so the match is
-    not made against a single stochastic draw.
-
-    Not needed to reproduce the figure -- the calibrated values are the shipped
-    DEFAULT_SIGMA_B. Provided so the calibration is auditable.
+    ``mu`` is recalibrated at every candidate sigma_b (bias strength shifts
+    accuracy), and the objective is averaged over ``n_rep`` independently
+    generated full designs so the calibration is not matched to a single
+    stochastic draw.
     """
-    rng = np.random.default_rng(2026) if rng is None else rng
-    grid = np.round(np.arange(0.20, 0.81, 0.02), 3) if grid is None else np.asarray(grid)
-    target = float(np.mean(np.std(np.asarray(empirical_far, dtype=float), axis=1, ddof=1)))
+    means = []
+    for _ in range(n_rep):
+        mu = calibrate_mu(K, sigma_b, rng, target=target_acc)
+        spreads = []
+        for _ in range(n_subj):
+            stim, choice, _, _ = generate_observer(K, mu, sigma_b, n_trial, 0.0, rng,
+                                                   alphas=[0.0])
+            spreads.append(np.nanstd(observer_far(stim, choice, K), ddof=1))
+        means.append(np.mean(spreads))
+    return float(np.mean(means))
 
-    best, best_gap, best_sim = None, np.inf, np.nan
-    for sb in grid:
-        sims = []
-        for _ in range(n_rep):
-            mu = calibrate_mu(K, sb, rng, target=target_acc)
-            spreads = []
-            for _ in range(n_subj):
-                stim, choice, _, _ = generate_observer(K, mu, sb, n_trial, 0.0, rng,
-                                                       alphas=[0.0])
-                spreads.append(np.nanstd(observer_far(stim, choice, K), ddof=1))
-            sims.append(np.mean(spreads))
-        sim = float(np.mean(sims))
-        if abs(sim - target) < best_gap:
-            best, best_gap, best_sim = float(sb), abs(sim - target), sim
-    print(f'K={K}: empirical SD_FAR={target:.4f}  sigma_b*={best:.3f}  '
-          f'simulated SD_FAR={best_sim:.4f}')
-    return best
+
+def calibrate_sigma_b(K, target_far_sd=None, seed=SEED_CALIBRATION, bracket=(0.001, 1.5),
+                      tol=1e-4, n_rep=10, n_subj=N_SUBJ, n_trial=N_TRIAL,
+                      target_acc=TARGET_ACC, verbose=True):
+    """Solve for the sigma_b that reproduces the empirical FAR dispersion.
+
+    Bounded Brent root search over ``bracket``, to absolute and relative
+    tolerance ``tol``. ``target_far_sd`` defaults to the empirical value for this
+    choice-set size (EMPIRICAL_FAR_SD).
+
+    Not needed to reproduce the figure -- the solved values are the shipped
+    DEFAULT_SIGMA_B (4-choice 0.368, 8-choice 0.446). Provided so the calibration
+    is auditable and re-runnable. It is expensive: each evaluation regenerates
+    ``n_rep`` full designs.
+    """
+    target = EMPIRICAL_FAR_SD[K] if target_far_sd is None else float(target_far_sd)
+    rng = np.random.default_rng(seed)
+
+    def objective(sigma_b):
+        simulated = simulated_far_dispersion(K, sigma_b, rng, n_subj, n_trial,
+                                             target_acc, n_rep)
+        if verbose:
+            print(f'    sigma_b={sigma_b:.4f} -> simulated SD_FAR={simulated:.5f} '
+                  f'(target {target:.5f})')
+        return simulated - target
+
+    solved = float(brentq(objective, bracket[0], bracket[1], xtol=tol, rtol=tol))
+    if verbose:
+        print(f'K={K}: sigma_b* = {solved:.3f}  (empirical SD_FAR target {target:.4f})')
+    return solved
+
+
+def no_bias_benchmark(K, n_observers=N_NULL_OBSERVERS, n_trial=N_TRIAL,
+                      target_acc=TARGET_ACC, seed=SEED_CALIBRATION, verbose=True):
+    """FAR dispersion expected from finite sampling alone, with NO response bias.
+
+    The response-bias vector is fixed at zero, so the chosen alternative is simply
+    the one with the largest evidence. This gives the null distribution of
+    within-observer FAR dispersion against which the empirical spread is compared:
+    it answers "how uneven would FAR look even in an observer with no stable
+    response preference, purely because each alternative is sampled a finite
+    number of times?"
+
+    Returns (dispersions, summary) where ``dispersions`` has one value per null
+    observer.
+    """
+    rng = np.random.default_rng(seed)
+    mu = calibrate_mu(K, 0.0, rng, target=target_acc)
+    dispersions = np.empty(n_observers)
+    for i in range(n_observers):
+        stim, choice, _, _ = generate_observer(K, mu, 0.0, n_trial, 0.0, rng, alphas=[0.0])
+        dispersions[i] = np.nanstd(observer_far(stim, choice, K), ddof=1)
+    summary = {
+        'K': K, 'n_observers': int(n_observers), 'n_trial': int(n_trial), 'mu': mu,
+        'mean_far_sd': float(dispersions.mean()),
+        'sd_far_sd': float(dispersions.std(ddof=1)),
+        'pct_2.5': float(np.percentile(dispersions, 2.5)),
+        'pct_97.5': float(np.percentile(dispersions, 97.5)),
+        'empirical_far_sd': EMPIRICAL_FAR_SD.get(K, np.nan),
+    }
+    if verbose:
+        print(f'K={K} no-bias null ({n_observers} observers): FAR SD = '
+              f'{summary["mean_far_sd"]:.4f} '
+              f'[{summary["pct_2.5"]:.4f}, {summary["pct_97.5"]:.4f}]   '
+              f'empirical = {summary["empirical_far_sd"]:.4f}')
+    return dispersions, summary
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -490,18 +623,39 @@ def main():
     p.add_argument('--target_acc', type=float, default=TARGET_ACC)
     p.add_argument('--k_list', type=int, nargs='+', default=[4, 8])
     p.add_argument('--alpha_step', type=float, default=0.1)
-    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--seed', type=int, default=None,
+                   help='Defaults to the reported seed for the chosen analysis.')
     p.add_argument('--trial-level', dest='trial_level', action='store_true',
                    help='Run the trial-level sweep instead of the digit-level one.')
     p.add_argument('--csv', type=str, default=None, help='Write the tidy results to CSV.')
     p.add_argument('--output', type=str, default=None, help='Save the figure (PDF/PNG).')
+    p.add_argument('--no-bias-benchmark', dest='no_bias', action='store_true',
+                   help='Run the no-bias null benchmark instead of the alpha sweep.')
+    p.add_argument('--calibrate', action='store_true',
+                   help='Re-solve sigma_b against the empirical FAR dispersion (slow).')
     args = p.parse_args()
+
+    if args.calibrate:
+        return {K: calibrate_sigma_b(K, n_subj=args.n_subj, n_trial=args.n_trial,
+                                     target_acc=args.target_acc)
+                for K in args.k_list}
+    if args.no_bias:
+        summaries = [no_bias_benchmark(K, n_trial=args.n_trial,
+                                       target_acc=args.target_acc)[1]
+                     for K in args.k_list]
+        out = pd.DataFrame(summaries)
+        if args.csv:
+            out.to_csv(args.csv, index=False)
+            print(f'Saved results -> {args.csv}')
+        return out
 
     alphas = np.round(np.arange(0.0, 1.0 + 1e-9, args.alpha_step), 3)
     runner = run_trial_level_alpha_sweep if args.trial_level else run_alpha_sweep
+    seed = args.seed if args.seed is not None else (
+        SEED_TRIAL_LEVEL if args.trial_level else SEED_GENERATION)
     results = runner(k_list=tuple(args.k_list), n_subj=args.n_subj, n_trial=args.n_trial,
                      conf_noise=args.conf_noise, target_acc=args.target_acc,
-                     alphas=alphas, seed=args.seed)
+                     alphas=alphas, seed=seed)
 
     if args.csv:
         results.to_csv(args.csv, index=False)

@@ -1,24 +1,27 @@
-# Self-monitoring in perceptual decisions by humans and machines
+# Bias-aware versus bias-blind confidence in humans and machines
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![OSF Data](https://img.shields.io/badge/Data_%26_Weights-OSF-green.svg)](https://osf.io/nz25w/overview?view_only=36e5bcc2225f4b55a54b77b5f690d786)
 
 > **Official repository for the manuscript:**
-> Song, B., & Rahnev, D. (2026). *Self-monitoring in perceptual decisions by humans and machines*.
+> Song, B., & Rahnev, D. (2026). *Bias-aware versus bias-blind confidence in humans and machines*.
 
 ---
 
 ## Overview
 
-Perceptual confidence is usually treated as monitoring stimulus uncertainty. This project asks whether humans and artificial neural networks (ANNs) go further and engage in **self-monitoring** of their own decisional tendencies — their response biases.
+Confidence evaluates the likely accuracy of a current decision. To be maximally informative about accuracy, it should also take account of a decision-maker's broader tendencies — such as a propensity to favour particular alternatives. This work distinguishes:
 
-Across 4- and 8-alternative perceptual decisions, a generative SDT simulation, mixed-effects regression, and hierarchical Bayesian mediation, the work shows:
+- **Bias-aware confidence**, which incorporates those response tendencies, from
+- **Bias-blind confidence**, which uses only the evidence available on the current trial.
 
-1. A **simulation** with graded bias correction establishes the signature to look for: as confidence corrects more strongly for the observer's own response bias, the accuracy-controlled bias→confidence coefficient flips from **positive to negative**, and metacognitive sensitivity rises.
+To adjudicate between them, the analyses identify a **signature of bias-aware confidence**: the down-weighting of confidence for alternatives a decision-maker is biased toward. Across 4- and 8-alternative digit classification (N = 200), a generative SDT simulation, mixed-effects regression, and hierarchical Bayesian mediation, the work shows:
+
+1. A **simulation with graded bias correction** establishes the signature to look for. As the confidence readout corrects more strongly for the observer's own response bias, the accuracy-controlled bias→confidence coefficient flips from **positive to negative**, and metacognitive sensitivity rises.
 2. **Humans** show the negative signature — they discount confidence for alternatives they over-select — and it is **attenuated under speed pressure**.
-3. **Standard ANNs** show the opposite sign: response bias *inflates* their confidence. They are bias-blind.
-4. **ANNs with a metacognitive module** reproduce the human-like negative relationship, without any change to the perceptual decision itself.
+3. **Standard ANNs** show the opposite sign: response bias *inflates* their confidence. Their confidence is bias-blind.
+4. **ANNs with a metacognitive module** produce bias-aware confidence, reproducing the human-like negative relationship without any change to the perceptual decision itself.
 
 ---
 
@@ -179,13 +182,24 @@ Use `--condition 4choice` / `8choice` for Experiment 1, or `--condition exp2` fo
 
 ### Figure 2 — Simulation
 
-Confidence evidence is `x + beta - alpha*beta`, where `alpha` is bias-correction strength. Because `beta` always enters the decision variable, **choices and accuracy are identical across the sweep** — only the confidence readout changes.
+Corrected evidence is `y = x + (1 - alpha) * b`, where `alpha` is the proportion of the observer's response-bias vector removed before confidence is read out. `alpha = 0` is bias-blind (confidence uses the same biased decision variables that produced the choice); `alpha = 1` is fully bias-aware. Because `b` always enters the decision variable, **the response is held fixed while the confidence computation varies** — choices and accuracy are identical across the whole sweep.
+
+Confidence is the raw evidence margin between the chosen alternative and the strongest non-chosen alternative *in corrected space*. The competitor is reselected at each `alpha`, so its identity can change even though the choice does not. Negative margins are retained: they mark trials where bias correction made a non-chosen alternative stronger than the selected one.
 
 ```bash
 python scripts_analysis/simulation.py --output figure2_simulation.pdf --csv figure2_simulation.csv
 ```
 
-`sigma_b` is calibrated so the simulated FAR spread matches the empirical spread (4-choice 0.368, 8-choice 0.446); `calibrate_sigma_b` reruns that calibration if you supply the empirical FAR array. `mu` is calibrated per condition to 64% overall accuracy, matching the human level.
+**Calibration.** `sigma_b` is solved so the simulated within-observer FAR dispersion matches the empirical value (**.0704** for 4-choice, **.0433** for 8-choice), by bounded Brent root search over [0.001, 1.5] to tolerance 1e-4. At each candidate, `mu` is recalibrated by 40 bisection iterations and the objective is averaged over 10 independently generated full designs. The solved values — **.368** and **.446** — are the shipped defaults, fixed for all subsequent simulations. `mu` is calibrated per condition to .64 overall accuracy, approximating the empirical .63.
+
+```bash
+python scripts_analysis/simulation.py --calibrate            # re-solve sigma_b (slow)
+python scripts_analysis/simulation.py --no-bias-benchmark    # null FAR dispersion
+```
+
+**Reported statistics.** Both nested models carry an observer-specific random intercept and a random slope for FAR. VIF between FAR and accuracy is reported per `alpha`. Metacognitive sensitivity Φ is the per-observer point-biserial correlation between trial confidence and correctness, with 95% CIs from 2,000 **observer-level** bootstrap samples.
+
+**Seeds.** Generation 1, calibration 2026, trial-level analysis 20250722.
 
 ### Figures 3 and 4 — Humans
 
@@ -276,6 +290,7 @@ Supplementary figure numbers are not stable while the manuscript is in revision,
 
 | Analysis | Code |
 |---|---|
+| No-bias benchmark: FAR dispersion expected from finite sampling alone | `simulation.no_bias_benchmark` |
 | Trial-level bias signature across correction strength (simulation) | `simulation.run_trial_level_alpha_sweep` |
 | Trial-level bias effect in humans | `trial_level.human_trial_level` |
 | Trial-level bias effect in ANNs, standard and learned readouts | `trial_level.ann_trial_level` |

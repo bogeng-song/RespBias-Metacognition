@@ -8,8 +8,9 @@ RANDOM a, b AND c' SLOPES.
 
 The direct effect c' is the quantity of interest: a NEGATIVE c' means confidence
 is discounted for alternatives the observer over-selects, once the accuracy
-route has been accounted for -- the signature of bias-aware (self-monitoring)
-confidence.
+route has been accounted for. That down-weighting IS the signature of bias-aware
+confidence; a positive c' indicates bias-blind confidence, where a tendency to
+choose an alternative inflates rather than discounts confidence in it.
 
 WHY RANDOM SLOPES ON ALL THREE PATHS
 ------------------------------------
