@@ -312,6 +312,59 @@ def summarize_moderated_mediation(trace, variables=None):
                          for v in (variables or MODERATED_SUMMARY_VARS)])
 
 
+# Which posterior parameter each reported path corresponds to. The supplementary
+# figure plots 'direct'; the others travel with it so the panel can be switched
+# without refitting.
+SWEEP_PATHS = {'a': 'a_path', 'b': 'b_mediator', 'direct': 'c_prime',
+               'indirect': 'indirect_effect', 'total': 'total_effect'}
+
+
+def run_mediation_alpha_sweep(frames, paths=None, predictor='FAR_z',
+                              mediator='accuracy_z', outcome='confidence_z',
+                              subject_id_col='subject_idx', verbose=True, **fit_kwargs):
+    """Mediation refitted at every bias-correction strength (Supplementary Figure 8).
+
+    ``frames`` maps ``(condition, alpha)`` to a digit-level frame -- exactly what
+    ``simulation.alpha_digit_frames`` returns. One full posterior is sampled per
+    entry, so this is the slowest analysis in the repository: 11 alphas x 2
+    conditions is 22 fits. Run it once and keep the returned table.
+
+    The direct effect c' is what the figure shows. It starts positive at
+    ``alpha = 0`` -- bias-blind confidence is inflated for over-selected
+    alternatives even with accuracy in the model -- and crosses zero as the
+    observer's confidence becomes bias-aware. The regression sweep in
+    ``simulation.run_alpha_sweep`` shows the same crossing without the mediator,
+    so the two are a consistency check on each other rather than two results.
+
+    Returns a tidy frame with one row per (condition, alpha, path).
+    """
+    paths = paths or SWEEP_PATHS
+    rows = []
+    for (condition, alpha), df in frames.items():
+        if verbose:
+            print(f'  {condition}  alpha={alpha:.1f} ...', flush=True)
+        trace = run_mediation(df, predictor=predictor, mediator=mediator,
+                              outcome=outcome, subject_id_col=subject_id_col,
+                              **fit_kwargs)
+        summary = summarize_mediation(trace, list(paths.values())).set_index('parameter')
+        for path, parameter in paths.items():
+            row = summary.loc[parameter]
+            rows.append({'choice_condition': condition,
+                         'K': int(str(condition).split('-')[0]),
+                         'alpha': float(alpha), 'path': path, 'parameter': parameter,
+                         'mean': float(row['mean']),
+                         'hdi_low': float(row['hdi_2.5%']),
+                         'hdi_high': float(row['hdi_97.5%']),
+                         'r_hat': float(row['r_hat']),
+                         'stars': str(row['stars'])})
+        if verbose:
+            direct = summary.loc[paths['direct']]
+            print(f"      direct c' = {direct['mean']:+.4f} "
+                  f"[{direct['hdi_2.5%']:+.4f}, {direct['hdi_97.5%']:+.4f}]  "
+                  f"{direct['stars']}")
+    return pd.DataFrame(rows)
+
+
 def diagnose(trace, summary, label=''):
     """Convergence audit. Returns (status, issues); status is 'OK' or 'CHECK'.
 

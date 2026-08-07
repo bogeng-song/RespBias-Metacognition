@@ -11,13 +11,18 @@ from ``figures.style``.
     draw_mediation         the bias -> accuracy -> confidence path diagram
     draw_interaction_bars  Experiment 2 simple slopes with the interaction bracket
     draw_grouped_bars      grouped bars with SEM error bars (metacognitive sensitivity)
-    draw_paired_bars       two paired conditions with a t-test bracket (RT check)
+    draw_paired_bars       two paired conditions with a t-test bracket (RT check,
+                           and Figure 1 panel B)
+    draw_example_scatter   one participant, one relationship (Figure 3 panel A)
+    draw_far_profiles      example participants' FAR across alternatives (Figure 1 C)
+    draw_far_sd_vs_null    FAR spread against the unbiased null (Figure 1 D)
 """
 
 import numpy as np
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
 
-from figures.style import fonts as resolve_fonts, style as resolve_style, pub_scatter
+from figures.style import (fonts as resolve_fonts, style as resolve_style, pub_scatter,
+                           TAB10)
 
 
 def star_label(p, ns=''):
@@ -67,7 +72,7 @@ def draw_nested_bars(ax, stats, scatter, title='', ylim=(-0.2, 0.3), star_y=None
     ax.set_yticks(np.round(np.arange(ylim[0], ylim[1] + 1e-9, ytick_step), 2))
     ax.tick_params(axis='y', labelsize=ft['ytick'])
     ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold')
-    ax.set_xlabel(xlabel, fontsize=ft['axis_label'], fontweight='bold')
+    ax.set_xlabel(xlabel, fontsize=ft['xaxis_label'], fontweight='bold')
     if title:
         ax.set_title(title, fontsize=ft['panel_title'], fontweight='bold',
                      color=st['title_color'], pad=8)
@@ -203,7 +208,7 @@ def draw_interaction_bars(ax, models, ylim=(-0.3, 0.5), title='', ft=None, st=No
     ax.tick_params(axis='y', labelsize=ft['ytick'])
     ax.set_ylabel(r'Bias effect on confidence ($\beta$)', fontsize=ft['axis_label'],
                   fontweight='bold')
-    ax.set_xlabel('Model', fontsize=ft['axis_label'], fontweight='bold')
+    ax.set_xlabel('Model regressors', fontsize=ft['xaxis_label'], fontweight='bold')
     legend = ax.legend(loc=legend_loc, fontsize=ft['legend'], frameon=False)
     if title:
         ax.set_title(title, fontsize=ft['panel_title'], fontweight='bold', pad=8)
@@ -284,12 +289,20 @@ def draw_grouped_bars(ax, values, groups, series, colors=None, ft=None, st=None,
 
 # ──────────────────────────────────────────────────────────────────────────────
 def draw_paired_bars(ax, values_a, values_b, labels=('Accuracy', 'Speed'), p=None,
-                     ylabel='', title='', ft=None, st=None, seed=0):
+                     ylabel='', title='', ft=None, st=None, seed=0, colors=None,
+                     ylim=None, bracket_frac=0.83, star_fontsize=None, bold_ticks=False):
     """Two paired conditions with individual points and a t-test bracket.
 
-    Used for the Experiment 2 manipulation check (decision RT and confidence RT).
+    Used for the Experiment 2 manipulation check (decision RT and confidence RT)
+    and for Figure 1 panel B (confidence on correct versus error trials).
+
+    ``ylim`` pins the y-range, which is what a measure with a floor other than
+    zero needs -- a 1-4 confidence scale, say; the bracket then sits at
+    ``bracket_frac`` of the range. Left as None the range is derived from the data
+    and starts at zero.
     """
     ft, st = ft or resolve_fonts(), st or resolve_style()
+    colors = list(colors or (st['acc_color'], st['speed_color']))
     a = np.asarray(values_a, dtype=float)
     b = np.asarray(values_b, dtype=float)
     ci95 = lambda v: 1.96 * np.std(v, ddof=1) / np.sqrt(len(v))
@@ -297,25 +310,152 @@ def draw_paired_bars(ax, values_a, values_b, labels=('Accuracy', 'Speed'), p=Non
     width = 0.60
 
     ax.bar(x, [a.mean(), b.mean()], yerr=[ci95(a), ci95(b)], width=width,
-           color=[st['acc_color'], st['speed_color']], alpha=0.70,
+           color=colors, alpha=0.70,
            edgecolor=st['bar_edgecolor'], linewidth=st['bar_edge_lw'], capsize=6,
            zorder=1, error_kw=dict(lw=1.5, capthick=1.5, ecolor='black', zorder=6))
     pub_scatter(ax, x[0], a, width, seed=2 * seed, st=st)
     pub_scatter(ax, x[1], b, width, seed=2 * seed + 1, st=st)
 
-    top = max(a.max(), b.max())
-    bracket = top * 1.05
-    ax.plot([0, 0, 1, 1], [bracket, bracket + 0.03 * top, bracket + 0.03 * top, bracket],
+    if ylim is None:
+        top = max(a.max(), b.max())
+        bracket = top * 1.05
+        tick, text_off = 0.03 * top, 0.035 * top
+        ylim = (0, bracket * (1 + 0.16 * ft['star'] / 13.0))
+    else:
+        span = ylim[1] - ylim[0]
+        bracket = ylim[0] + bracket_frac * span
+        tick, text_off = 0.025 * span, 0.030 * span
+    ax.plot([0, 0, 1, 1], [bracket, bracket + tick, bracket + tick, bracket],
             lw=1.3, c='k', clip_on=False)
-    ax.text(0.5, bracket + 0.035 * top, star_label(p, ns='n.s.'), ha='center',
-            va='bottom', fontsize=ft['star'], fontweight='bold')
+    ax.text(0.5, bracket + text_off, star_label(p, ns='n.s.'), ha='center',
+            va='bottom', fontsize=star_fontsize or ft['star'], fontweight='bold')
 
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, fontsize=ft['xtick'])
+    ax.set_xticklabels(labels, fontsize=ft['xtick'],
+                       fontweight='bold' if bold_ticks else 'normal')
     ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold')
     if title:
         ax.set_title(title, fontsize=ft['panel_title'], fontweight='bold')
     ax.set_xlim(-0.6, 1.6)
-    ax.set_ylim(0, bracket * (1 + 0.16 * ft['star'] / 13.0))
+    ax.set_ylim(*ylim)
     ax.tick_params(axis='y', labelsize=ft['ytick'])
     ax.grid(axis='y', linestyle='--', alpha=0.22, zorder=0)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+def draw_example_scatter(ax, x, y, alternatives, xlabel='', ylabel='',
+                         beta_xy=(0.70, 0.25), ft=None, st=None):
+    """One relationship for ONE participant: labelled points, a fit, and beta.
+
+    Each point is one response alternative. The alternative is printed beside its
+    point in the matching tab10 colour, so the same digit is recognisable across
+    the four columns of Figure 3 panel A, and the dashed line is the simple
+    regression whose slope is annotated.
+    """
+    from scipy.stats import linregress
+    ft, st = ft or resolve_fonts(), st or resolve_style()
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    slope, intercept, *_ = linregress(x, y)
+    grid = np.linspace(x.min(), x.max(), 100)
+    ax.plot(grid, slope * grid + intercept, st['fit_line_style'],
+            color=st['fit_line_color'], lw=st['fit_line_lw'], zorder=1)
+
+    dx = 0.02 * np.ptp(x) if np.ptp(x) > 0 else 0.01
+    dy = 0.02 * np.ptp(y) if np.ptp(y) > 0 else 0.01
+    for xi, yi, alternative in zip(x, y, alternatives):
+        colour = TAB10[int(alternative) % 10]
+        ax.scatter(xi, yi, s=st['marker_face_size'], color=colour,
+                   edgecolor=st['marker_edge'], alpha=st['marker_face_alpha'], zorder=3)
+        ax.text(xi + dx, yi + dy, str(int(alternative)), fontsize=ft['digit_label'],
+                color=colour, zorder=4)
+
+    ax.set_xlabel(xlabel, fontsize=ft['axis_label'], fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold', labelpad=9)
+    ax.tick_params(labelsize=ft['ytick'])
+    ax.grid(linestyle=':', alpha=st['scatter_grid_alpha'])
+    ax.text(beta_xy[0], beta_xy[1], rf'$\beta$={slope:.2f}', transform=ax.transAxes,
+            ha='left', va='top', fontsize=ft['beta_box'], fontweight='bold',
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.75, lw=0))
+    return float(slope)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+def draw_far_profiles(ax, far, alternatives, labels=None, headroom=1.42,
+                      xlabel='Response alternative', ylabel='False-alarm rate (FAR)',
+                      ft=None, st=None):
+    """Figure 1 panel C: the FAR of a few example participants across alternatives.
+
+    ``far`` is (n_examples x n_alternatives). A flat line would be an unbiased
+    participant; the point of the panel is that real profiles are not flat and
+    that their shape differs from person to person.
+    """
+    ft, st = ft or resolve_fonts(), st or resolve_style()
+    far = np.atleast_2d(np.asarray(far, dtype=float))
+    colours = st['profile_colors']
+    labels = labels or [f'Subject {i + 1}' for i in range(len(far))]
+    for i, profile in enumerate(far):
+        ax.plot(alternatives, profile, marker='o', ms=6.0, lw=2.0,
+                color=colours[i % len(colours)], label=labels[i % len(labels)])
+    ax.set_xticks(list(alternatives))
+    ax.set_ylim(0, np.nanmax(far) * headroom)
+    ax.set_xlabel(xlabel, fontsize=ft['axis_label'], fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold')
+    ax.tick_params(labelsize=ft['ytick'])
+    ax.grid(linestyle='--', alpha=st['grid_alpha'])
+    ax.legend(frameon=False, fontsize=ft['legend'], loc='upper right',
+              handlelength=1.1, handletextpad=0.5, labelspacing=0.25, borderpad=0.2)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+def draw_far_sd_vs_null(ax, spreads, nulls, labels, p_values=None, seed=0,
+                        headroom=1.24, ylabel='SD of FAR across choices',
+                        null_label='no-bias null', line_half=0.36, leader_inset=0.30,
+                        label_dy=0.30, star_y=0.965, ft=None, st=None):
+    """Figure 1 panel D: per-participant FAR spread against the unbiased null.
+
+    The null is a single accuracy- and trial-matched value per condition (see
+    ``simulation.no_bias_benchmark``), so it is drawn as a line over its bar
+    rather than as a second bar, and the accompanying test is one-sample.
+
+    ``spreads`` is one array of per-participant SDs per condition; ``nulls`` the
+    matching scalar null values. One leader runs from the label to every null
+    line -- a legend would sit either on the stars or on the lines themselves.
+    """
+    ft, st = ft or resolve_fonts(), st or resolve_style()
+    colours = st['condition_colors']
+    x = np.arange(len(spreads), dtype=float)
+    ceiling = 0.0
+
+    for i, values in enumerate(spreads):
+        values = np.asarray(values, dtype=float)
+        ci = 1.96 * values.std(ddof=1) / np.sqrt(len(values))
+        ax.bar(x[i], values.mean(), width=st['bar_width'] * 1.09,
+               color=colours[i % len(colours)], alpha=0.80,
+               edgecolor=st['bar_edgecolor'], linewidth=st['bar_edge_lw'], zorder=2)
+        ax.errorbar(x[i], values.mean(), yerr=ci, color='black', capsize=4,
+                    elinewidth=st['error_lw'], capthick=st['error_lw'], zorder=6)
+        pub_scatter(ax, x[i], values, st['bar_width'] * 1.09, seed=seed + i, st=st)
+        ax.plot([x[i] - line_half, x[i] + line_half], [nulls[i]] * 2, ls='--', lw=1.9,
+                color=st['null_color'], zorder=7)
+        ceiling = max(ceiling, float(values.max()))
+
+    ax.set_ylim(0, ceiling * headroom)
+    low, high = ax.get_ylim()
+    for i, p in enumerate(p_values or []):
+        ax.text(x[i], low + star_y * (high - low), star_label(p, ns='n.s.'),
+                ha='center', va='top', fontsize=ft['star'], fontweight='bold')
+
+    label_xy = (float(np.mean(x)), max(nulls) + label_dy * (high - low))
+    leader = dict(arrowstyle='-', lw=1.1, color='black', shrinkA=7, shrinkB=2)
+    for i in range(len(x)):
+        target = (x[i] + np.sign(label_xy[0] - x[i]) * leader_inset, nulls[i])
+        ax.annotate(null_label if i == 0 else '', xy=target, xytext=label_xy,
+                    fontsize=ft['annotation'], fontweight='bold', ha='center',
+                    va='bottom', arrowprops=dict(leader))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(list(labels), fontsize=ft['xtick'], fontweight='bold')
+    ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold')
+    ax.tick_params(labelsize=ft['ytick'])
+    ax.grid(axis='y', linestyle='--', alpha=st['grid_alpha'], zorder=0)

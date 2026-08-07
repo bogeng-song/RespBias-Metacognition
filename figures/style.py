@@ -54,6 +54,13 @@ PURPLE = '#A33297'                               # row / condition titles
 # which encode regression models rather than readouts: two shades of one hue for
 # the two free readouts, a contrasting hue for the trained head.
 PHI_COLORS = ['#6A51A3', '#BCBDDC', '#A50F15']
+# Per-alternative marker colours for the example-participant grid (Figure 3 panel A):
+# alternative d takes TAB10[d % 10], so a digit keeps its colour across every panel.
+TAB10 = list(mpl.colormaps['tab10'].colors)
+# Condition colours: 4-choice, 8-choice. Used by Figure 1 and the alpha sweeps.
+CONDITION_COLORS = ['#4E79A7', '#E15759']
+# Example-participant profile colours in Figure 1 panel C.
+PROFILE_COLORS = ['#4E79A7', '#E15759', '#59A14F']
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -64,6 +71,8 @@ FONT_SCALE = 1.0
 FONTS = {
     'panel_title':    12.0,
     'axis_label':     11.0,
+    'xaxis_label':    13.0,   # x axis label only, where it names what the ticks are
+                              # ("Model regressors" above "Bias only" / "Bias + Acc")
     'xtick':          10.0,
     'ytick':          10.0,
     'legend':          9.0,
@@ -74,6 +83,9 @@ FONTS = {
     'path_star':      11.0,
     'panel_letter':   21.0,
     'block_header':   13.0,
+    'beta_box':       12.0,   # the beta annotation inside an example-participant scatter
+    'digit_label':    10.0,   # the alternative printed beside each of its points
+    'annotation':     10.0,   # in-plot text such as the no-bias-null leader label
 }
 
 
@@ -148,6 +160,18 @@ STYLE = {
     'speed_color':    COND_SPEED_COLOR,
     # metacognitive sensitivity readouts
     'phi_colors':     list(PHI_COLORS),
+    # Figure 1
+    'condition_colors': list(CONDITION_COLORS),
+    'profile_colors':   list(PROFILE_COLORS),
+    'null_color':       'black',      # the no-bias reference line in Figure 1 panel D
+    # Figure 3 panel A: the example-participant scatter grid
+    'marker_face_size':  68.0,
+    'marker_face_alpha': 0.92,
+    'marker_edge':       'black',
+    'fit_line_color':    'black',
+    'fit_line_lw':       1.4,
+    'fit_line_style':    '--',
+    'scatter_grid_alpha': 0.40,
 }
 
 

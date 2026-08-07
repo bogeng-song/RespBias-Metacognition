@@ -1,317 +1,130 @@
 """
-figure2.py
-Generates the example-participant figure (manuscript Figure 3):
-  "Empirical relationships between response bias and confidence"
+example_participant.py
+The four relationships that Figure 3 panel A shows for a single participant.
 
-Note on numbering: in the current manuscript, Figure 1 is the generative SDT
-simulation (see scripts_analysis/simulation.py), Figure 2 is the task schematic
-(not code-generated), and this example-participant figure is Figure 3.
+Every group-level result in the paper rests on the same four quantities computed
+per response alternative. Showing them for one person makes the regression and
+the mediation that follow readable: the reader can see the points the model is
+fitted to before seeing the coefficients.
 
-Panel A: Theoretical illustration — optimal confidence vs. response bias
-         (4-choice and 8-choice), derived from average empirical response biases
-         across all participants.
-Panel B: Example participant — bias~confidence, bias~accuracy, and
-         bias~confidence-residual (after controlling for accuracy),
-         for both the 4-choice (top row) and 8-choice (bottom row).
+    confidence -> accuracy     confidence tracks performance at all
+    bias -> accuracy           over-selected alternatives are answered worse
+    bias -> confidence         over-selected alternatives are rated MORE confident
+    bias -> confidence residual   ... and still are, with accuracy partialled out
 
-Usage:
-    python notebooks/figure2.py \
-        --data4 data/human_data/Experiment1_4_choice.csv \
-        --data8 data/human_data/Experiment1_8_choice.csv \
-        --example_sub 12 \
-        --output figure3_example_participant.pdf
+The last column is the paper's claim in one panel: the raw bias-confidence slope
+could be explained away by accuracy, and it is not.
+
+CONVENTIONS
+-----------
+Everything is stimulus-keyed, matching the group arrays. FAR carries the
+one-vs-rest Hautus (half-count) correction, because these ARE alternative-level
+rates -- unlike the trial-level analyses, which use raw counts. The residual
+fits raw ``confidence ~ accuracy + FAR`` and subtracts only the accuracy
+component, leaving confidence with accuracy partialled out rather than with the
+bias effect removed along with it.
+
+Usage
+-----
+    from figures.example_participant import example_participant_arrays
+
+    arrays = example_participant_arrays(
+        pd.read_csv('data/human_data/Experiment1_8_choice.csv'),
+        subject_id=12, alternatives=[1, 2, 3, 4, 5, 6, 7, 8])
+
+Rendering is done by ``figures.main_figures.figure3_humans(..., example=...)``;
+this module only computes.
 """
 
-import argparse
-import os
 import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
-from scipy.stats import linregress
-import matplotlib as mpl
+from scipy.stats import norm
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Style constants (matches manuscript / Nature Human Behaviour style)
-# ──────────────────────────────────────────────────────────────────────────────
-DIGIT_COLORS_4 = {5: "#9467bd", 6: "#8c564b", 7: "#e377c2", 8: "#7f7f7f"}
-DIGIT_COLORS_8 = {
-    1: "#1f77b4", 2: "#ff7f0e", 3: "#2ca02c", 4: "#d62728",
-    5: "#9467bd", 6: "#8c564b", 7: "#e377c2", 8: "#7f7f7f"
-}
-PANEL_A_COLORS = {"4-choice": "#4E79A7", "8-choice": "#F28E2B"}
+EXP1_COLUMNS = {'subject': 'Sub_id', 'stimulus': 'Stimulus', 'response': 'Response',
+                'correct': 'Correct', 'confidence': 'Confidence'}
 
-mpl.rcParams.update({
-    "font.family": "sans-serif",
-    "font.size": 11,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.linewidth": 1.2,
-    "xtick.major.width": 1.2,
-    "ytick.major.width": 1.2,
-})
+# The participant shown in the manuscript.
+DEFAULT_SUBJECT = 12
+
+# Column headers and axis labels, in the order the panels appear.
+COLUMN_TITLES = ['Confidence-accuracy\nrelationship',
+                 'Bias-accuracy\nrelationship',
+                 'Bias-confidence\nrelationship',
+                 'Bias-confidence\nrelationship\n(accuracy accounted for)']
+X_LABELS = ['Confidence', 'Bias', 'Bias', 'Bias']
+Y_LABELS = ['Accuracy', 'Accuracy', 'Confidence',
+            'Confidence residual\n(accuracy controlled)']
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helper: compute per-subject per-digit statistics
-# ──────────────────────────────────────────────────────────────────────────────
-def compute_digit_stats(df: pd.DataFrame, digits: list) -> pd.DataFrame:
+def one_vs_rest_far(is_stimulus, is_response):
+    """FAR for one alternative against all others, with the Hautus correction.
+
+    A count of 0 becomes 0.5 and a count of n becomes n - 0.5, which keeps the
+    rate off the boundaries where the normal-deviate transform is undefined.
     """
-    Returns a DataFrame with columns:
-    Sub_id, Digit, HR, FAR, Accuracy, Confidence, Conf_residual
-    where Conf_residual = confidence with accuracy linearly regressed out (raw scale).
+    is_stimulus = np.asarray(is_stimulus) > 0
+    is_response = np.asarray(is_response) > 0
+    n_noise = np.sum(~is_stimulus)
+    false_alarms = np.sum((~is_stimulus) & is_response)
+    if false_alarms == n_noise:
+        false_alarms = n_noise - 0.5
+    elif false_alarms == 0:
+        false_alarms = 0.5
+    return float(np.clip(false_alarms / n_noise, 1e-9, 1 - 1e-9))
+
+
+def sdt_parameters(is_stimulus, is_response):
+    """(d', criterion, beta, HR, FAR) for one alternative against all others."""
+    is_stimulus = np.asarray(is_stimulus) > 0
+    is_response = np.asarray(is_response) > 0
+    n_signal = np.sum(is_stimulus)
+    hits = np.sum(is_stimulus & is_response)
+    if hits == n_signal:
+        hits = n_signal - 0.5
+    elif hits == 0:
+        hits = 0.5
+    hit_rate = float(np.clip(hits / n_signal, 1e-9, 1 - 1e-9))
+    far = one_vs_rest_far(is_stimulus, is_response)
+    dprime = norm.ppf(hit_rate) - norm.ppf(far)
+    criterion = -0.5 * (norm.ppf(hit_rate) + norm.ppf(far))
+    return dprime, criterion, float(np.exp(dprime * criterion)), hit_rate, far
+
+
+def example_participant_arrays(trials, subject_id=DEFAULT_SUBJECT, alternatives=None,
+                               columns=None):
+    """Per-alternative accuracy, confidence, FAR and confidence residual, one participant.
+
+    Returns a dict with ``accuracy``, ``confidence``, ``far``, ``residual`` and
+    ``alternatives``; ``figure3_humans`` reads exactly those keys.
     """
-    records = []
-    for sub_id, sub_df in df.groupby("Sub_id"):
-        hrs, fars, accs, confs = [], [], [], []
-        for d in digits:
-            stim     = sub_df[sub_df["Stimulus"] == d]
-            non_stim = sub_df[sub_df["Stimulus"] != d]
+    columns = columns or EXP1_COLUMNS
+    block = trials[trials[columns['subject']] == subject_id]
+    if block.empty:
+        raise ValueError(f'Participant {subject_id} not found in this dataset.')
+    if alternatives is None:
+        alternatives = np.sort(trials[columns['stimulus']].dropna().unique())
 
-            hr  = stim["Correct"].mean()             if len(stim) > 0     else np.nan
-            far = (non_stim["Response"] == d).mean() if len(non_stim) > 0 else np.nan
-            acc = hr
-            conf = stim["Confidence"].mean()         if len(stim) > 0     else np.nan
+    stim = block[columns['stimulus']].to_numpy()
+    resp = block[columns['response']].to_numpy()
+    accuracy, confidence, far = [], [], []
+    for alternative in alternatives:
+        rows = block[block[columns['stimulus']] == alternative]
+        accuracy.append(rows[columns['correct']].mean())
+        confidence.append(rows[columns['confidence']].mean())
+        far.append(sdt_parameters(stim == alternative, resp == alternative)[4])
 
-            hrs.append(hr); fars.append(far); accs.append(acc); confs.append(conf)
-
-        # Confidence residual: regress out accuracy (simple OLS, raw scale)
-        accs_a  = np.array(accs, dtype=float)
-        confs_a = np.array(confs, dtype=float)
-        valid   = ~(np.isnan(accs_a) | np.isnan(confs_a))
-        conf_residual = np.full_like(confs_a, np.nan)
-        if valid.sum() >= 2 and np.std(accs_a[valid]) > 0:
-            slope, intercept, *_ = linregress(accs_a[valid], confs_a[valid])
-            conf_residual[valid] = confs_a[valid] - (slope * accs_a[valid] + intercept)
-
-        for i, d in enumerate(digits):
-            records.append({
-                "Sub_id": sub_id, "Digit": d,
-                "HR": hrs[i], "FAR": fars[i],
-                "Accuracy": accs[i], "Confidence": confs[i],
-                "Conf_residual": conf_residual[i],
-            })
-    return pd.DataFrame(records)
+    accuracy = np.asarray(accuracy, dtype=float)
+    confidence = np.asarray(confidence, dtype=float)
+    far = np.asarray(far, dtype=float)
+    design = np.column_stack([np.ones(len(accuracy)), accuracy, far])
+    beta_accuracy = np.linalg.lstsq(design, confidence, rcond=None)[0][1]
+    return {'accuracy': accuracy, 'confidence': confidence, 'far': far,
+            'residual': confidence - beta_accuracy * accuracy,
+            'alternatives': list(alternatives), 'subject_id': subject_id}
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Panel A helpers
-# ──────────────────────────────────────────────────────────────────────────────
-def optimal_confidence(hr: np.ndarray, far: np.ndarray, n_alt: int) -> np.ndarray:
-    """
-    P(correct | choice = digit) using Bayes' rule with a uniform stimulus prior.
-    = HR * (1/N) / [HR * (1/N) + FAR * ((N-1)/N)]
-    """
-    prior  = 1.0 / n_alt
-    p_corr = hr * prior / (hr * prior + far * (1 - prior))
-    return p_corr
-
-
-def mean_hr_far(df: pd.DataFrame, digits: list) -> tuple:
-    """Average HR and FAR across all subjects for each digit."""
-    hr_all, far_all = [], []
-    for d in digits:
-        hrs, fars = [], []
-        for _, sub_df in df.groupby("Sub_id"):
-            stim     = sub_df[sub_df["Stimulus"] == d]
-            non_stim = sub_df[sub_df["Stimulus"] != d]
-            if len(stim) > 0:
-                hrs.append(stim["Correct"].mean())
-            if len(non_stim) > 0:
-                fars.append((non_stim["Response"] == d).mean())
-        hr_all.append(np.nanmean(hrs))
-        far_all.append(np.nanmean(fars))
-    return np.array(hr_all), np.array(far_all)
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Scatter helper with regression line + β annotation
-# ──────────────────────────────────────────────────────────────────────────────
-def scatter_with_regression(ax, x, y, colors_dict, digits, xlabel, ylabel,
-                             beta_pos="lower_right", point_size=90, fontsize=11):
-    """
-    Scatter plot with labelled points + dashed OLS regression line + β annotation.
-    beta_pos: 'lower_right' or 'upper_left'
-    """
-    slope, intercept, r, p, _ = linregress(x, y)
-
-    xx = np.linspace(np.min(x), np.max(x), 200)
-    ax.plot(xx, slope * xx + intercept, "--", color="black", lw=1.5, zorder=1)
-
-    # Point jitter offset for labels
-    dx = 0.012 * (np.max(x) - np.min(x)) if np.ptp(x) > 1e-9 else 0.001
-    dy = 0.012 * (np.max(y) - np.min(y)) if np.ptp(y) > 1e-9 else 0.001
-
-    for xi, yi, d in zip(x, y, digits):
-        c = colors_dict.get(int(d), "gray")
-        ax.scatter(xi, yi, s=point_size, color=c, edgecolor="black",
-                   linewidth=0.7, zorder=3, alpha=0.92)
-        ax.text(xi + dx, yi + dy, str(int(d)),
-                fontsize=fontsize - 2, color=c, zorder=4, fontweight="bold")
-
-    # β annotation
-    beta_str = f"β = {slope:.2f}"
-    if beta_pos == "upper_left":
-        tx, ty, ha, va = 0.05, 0.92, "left", "top"
-    elif beta_pos == "lower_right":
-        tx, ty, ha, va = 0.95, 0.08, "right", "bottom"
-    elif beta_pos == "lower_left":
-        tx, ty, ha, va = 0.05, 0.08, "left", "bottom"
-    else:
-        tx, ty, ha, va = 0.05, 0.92, "left", "top"
-
-    ax.text(tx, ty, beta_str, transform=ax.transAxes,
-            fontsize=fontsize, ha=ha, va=va, style="italic",
-            bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.7, ec="none"))
-
-    ax.set_xlabel(xlabel, fontsize=fontsize, fontweight="bold")
-    ax.set_ylabel(ylabel, fontsize=fontsize, fontweight="bold")
-    ax.tick_params(labelsize=fontsize - 1)
-    return slope, p
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Main figure function
-# ──────────────────────────────────────────────────────────────────────────────
-def make_figure2(df4: pd.DataFrame, df8: pd.DataFrame,
-                 example_sub: int = 12,
-                 output_path: str = "figure2.pdf",
-                 fontsize: int = 11):
-
-    digits4 = list(range(5, 9))
-    digits8 = list(range(1, 9))
-
-    # ── Compute aggregate stats ────────────────────────────────────────────────
-    hr4, far4 = mean_hr_far(df4, digits4)
-    hr8, far8 = mean_hr_far(df8, digits8)
-    opt4 = optimal_confidence(hr4, far4, n_alt=4)
-    opt8 = optimal_confidence(hr8, far8, n_alt=8)
-
-    # ── Compute example participant stats ──────────────────────────────────────
-    agg4 = compute_digit_stats(df4, digits4)
-    agg8 = compute_digit_stats(df8, digits8)
-
-    ex4 = agg4[agg4["Sub_id"] == example_sub].sort_values("Digit")
-    ex8 = agg8[agg8["Sub_id"] == example_sub].sort_values("Digit")
-
-    if len(ex4) == 0 or len(ex8) == 0:
-        raise ValueError(f"Subject {example_sub} not found in one or both datasets.")
-
-    # ── Layout: 2 rows ─────────────────────────────────────────────────────────
-    # Row 0 = Panel A (2 scatter plots)
-    # Row 1 = Panel B (2 rows × 3 cols = 6 scatter plots, shown as one 2×3 sub-grid)
-    fig = plt.figure(figsize=(14, 10))
-    gs_outer = gridspec.GridSpec(2, 1, figure=fig,
-                                 height_ratios=[1, 1.8],
-                                 hspace=0.42)
-
-    # ── PANEL A ────────────────────────────────────────────────────────────────
-    gs_a = gridspec.GridSpecFromSubplotSpec(1, 2, subplot_spec=gs_outer[0],
-                                            wspace=0.40)
-    ax_a4 = fig.add_subplot(gs_a[0])
-    ax_a8 = fig.add_subplot(gs_a[1])
-
-    # 4-choice
-    slope_a4, _ = scatter_with_regression(
-        ax_a4, far4, opt4,
-        colors_dict=DIGIT_COLORS_4, digits=digits4,
-        xlabel="Response Bias (FAR)",
-        ylabel="Optimal Confidence",
-        beta_pos="lower_left", fontsize=fontsize)
-    ax_a4.set_title("4-Choice", fontsize=fontsize + 1, fontweight="bold", pad=6)
-
-    # 8-choice
-    slope_a8, _ = scatter_with_regression(
-        ax_a8, far8, opt8,
-        colors_dict=DIGIT_COLORS_8, digits=digits8,
-        xlabel="Response Bias (FAR)",
-        ylabel="Optimal Confidence",
-        beta_pos="lower_left", fontsize=fontsize)
-    ax_a8.set_title("8-Choice", fontsize=fontsize + 1, fontweight="bold", pad=6)
-
-    # Panel A label
-    fig.text(0.01, 0.97, "A", fontsize=16, fontweight="bold", va="top")
-
-    # ── PANEL B ────────────────────────────────────────────────────────────────
-    # 2 rows (4-choice top, 8-choice bottom) × 3 cols
-    gs_b = gridspec.GridSpecFromSubplotSpec(2, 3, subplot_spec=gs_outer[1],
-                                            wspace=0.40, hspace=0.50)
-
-    col_titles = [
-        "Bias–Confidence\n(without acc. control)",
-        "Bias–Accuracy",
-        "Bias–Confidence\n(acc. controlled)",
-    ]
-    row_labels = ["4-Choice", "8-Choice"]
-
-    for row_i, (ex, digits, cmap) in enumerate([
-        (ex4, digits4, DIGIT_COLORS_4),
-        (ex8, digits8, DIGIT_COLORS_8),
-    ]):
-        far_vals  = ex["FAR"].values
-        acc_vals  = ex["Accuracy"].values
-        conf_vals = ex["Confidence"].values
-        resid_vals = ex["Conf_residual"].values
-        digs       = ex["Digit"].values
-
-        # Column 0: Confidence vs. FAR (no accuracy control)
-        ax = fig.add_subplot(gs_b[row_i, 0])
-        scatter_with_regression(ax, far_vals, conf_vals, cmap, digs,
-                                 "Response Bias (FAR)", "Confidence",
-                                 beta_pos="upper_left", fontsize=fontsize)
-        if row_i == 0:
-            ax.set_title(col_titles[0], fontsize=fontsize, pad=6)
-        ax.set_ylabel(f"{row_labels[row_i]}\nConfidence",
-                      fontsize=fontsize, fontweight="bold")
-
-        # Column 1: Accuracy vs. FAR
-        ax = fig.add_subplot(gs_b[row_i, 1])
-        scatter_with_regression(ax, far_vals, acc_vals, cmap, digs,
-                                 "Response Bias (FAR)", "Accuracy",
-                                 beta_pos="upper_left", fontsize=fontsize)
-        if row_i == 0:
-            ax.set_title(col_titles[1], fontsize=fontsize, pad=6)
-        ax.set_ylabel("Accuracy", fontsize=fontsize, fontweight="bold")
-
-        # Column 2: Confidence residual vs. FAR (after accuracy controlled)
-        ax = fig.add_subplot(gs_b[row_i, 2])
-        scatter_with_regression(ax, far_vals, resid_vals, cmap, digs,
-                                 "Response Bias (FAR)",
-                                 "Confidence\n(acc. controlled)",
-                                 beta_pos="lower_left", fontsize=fontsize)
-        if row_i == 0:
-            ax.set_title(col_titles[2], fontsize=fontsize, pad=6)
-        ax.set_ylabel("Confidence residual", fontsize=fontsize, fontweight="bold")
-        ax.axhline(0, color="gray", lw=0.8, ls="--", zorder=0)
-
-    # Panel B label
-    fig.text(0.01, 0.67, "B", fontsize=16, fontweight="bold", va="top")
-
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
-    print(f"Figure saved to: {output_path}")
-    return fig
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# CLI entry point
-# ──────────────────────────────────────────────────────────────────────────────
-def main():
-    p = argparse.ArgumentParser(description="Generate Figure 2")
-    p.add_argument("--data4",       default="data/human_data/Experiment1_4_choice.csv")
-    p.add_argument("--data8",       default="data/human_data/Experiment1_8_choice.csv")
-    p.add_argument("--example_sub", type=int, default=12,
-                   help="Sub_id for the example participant in Panel B")
-    p.add_argument("--output",      default="figure2.pdf")
-    p.add_argument("--fontsize",    type=int, default=11)
-    args = p.parse_args()
-
-    df4 = pd.read_csv(args.data4)
-    df8 = pd.read_csv(args.data8)
-    make_figure2(df4, df8,
-                 example_sub=args.example_sub,
-                 output_path=args.output,
-                 fontsize=args.fontsize)
-
-
-if __name__ == "__main__":
-    main()
+def example_panel_series(arrays):
+    """The four (x, y) pairs of panel A, in column order."""
+    return [(arrays['confidence'], arrays['accuracy']),
+            (arrays['far'], arrays['accuracy']),
+            (arrays['far'], arrays['confidence']),
+            (arrays['far'], arrays['residual'])]

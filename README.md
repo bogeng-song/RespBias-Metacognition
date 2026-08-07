@@ -145,16 +145,16 @@ RespBias-Metacognition/
         msdt_model.py              Multi-alternative SDT estimation (PyMC)
         regression.py              Mixed-effects regression + joint moderated model
         mediation.py               Bayesian mediation, random a/b/c' slopes
-        trial_level.py             Trial-level FAR -> confidence (humans and ANNs)
-        controls.py                Guessing controls and individual differences
+        trial_level.py             Trial-level FAR -> confidence (humans, Exp 2 joint, ANNs)
+        controls.py                Behavioural checks, guessing controls, individual differences
         collinearity.py            VIF diagnostics (behavioural and ANN)
         metacognitive_sensitivity.py   Within-instance confidence-accuracy correlation
 
     figures/                       Figure generation
         style.py                   Fonts / layout / colours, shared point convention
         panels.py                  Reusable panel drawers (no panel letters)
-        main_figures.py            Figures 3-6, or any single panel standalone
-        example_participant.py     Single-participant scatter grid (Figure 3A)
+        main_figures.py            Figures 1, 3-6, or any single panel standalone
+        example_participant.py     The four per-alternative relationships (Figure 3A)
 
     notebooks/
         analysis_walkthrough.ipynb End-to-end walkthrough
@@ -179,6 +179,25 @@ Use `--condition 4choice` / `8choice` for Experiment 1, or `--condition exp2` fo
 ---
 
 ## 5. Reproducing the figures
+
+### Figure 1 — Task structure and behavioural checks
+
+Panel A is the task schematic, supplied as artwork. Panels B–D are computed:
+
+```python
+from scripts_analysis.controls import behavioural_checks
+from figures.main_figures import figure1_task_and_checks
+
+checks = behavioural_checks()                  # ~1 min: the null is 2,000 simulated observers
+figure1_task_and_checks(checks, artwork="figures_out/task_schematic.png",
+                        out_stem="figures_out/figure1")
+```
+
+**B** confidence on correct versus error trials. **C** the FAR profile of three example participants, chosen automatically for a strong and shape-distinct bias. **D** the per-participant spread of FAR across alternatives.
+
+The reference in panel D is **not zero**. Any participant shows some FAR spread purely because each alternative is sampled a finite number of times, so the comparison is against `simulation.no_bias_benchmark` — M-SDT observers with the bias vector fixed at zero, matched to each condition's own accuracy and trial count. p-values across the four tests are Holm-corrected together.
+
+`figure1_task_and_checks` reports the artwork's effective resolution at the rendered panel width and says so if it falls below 300 DPI, because a schematic that reads fine on screen is routinely too coarse for print.
 
 ### Figure 2 — Simulation
 
@@ -226,7 +245,20 @@ trace = run_mediation(df, predictor="FAR_z")
 print(summarize_mediation(trace))
 ```
 
-**Figure 4 (Experiment 2)** — both speed–accuracy conditions are fit **together**, with condition effect-coded, so the Bias × Condition interaction and the accuracy-versus-speed difference in the direct effect each get their own estimate:
+Panel A shows the same four quantities for a single participant, before any group model:
+
+```python
+from figures.example_participant import example_participant_arrays
+from figures.main_figures import figure3_humans
+
+example = {"8-choice condition": example_participant_arrays(
+    pd.read_csv("data/human_data/Experiment1_8_choice.csv"), subject_id=12)}
+figure3_humans(results, example=example, out_stem="figures_out/figure3")
+```
+
+Supplying `example` makes it the three-panel manuscript figure (A example participant, B regression, C mediation); omitting it gives the two-panel form.
+
+**Figure 4 (Experiment 2)** — panel A is the manipulation check, `controls.rt_manipulation_check`, which confirms the instruction moved decision RT and confidence RT. Panels B and C fit both speed–accuracy conditions **together**, with condition effect-coded, so the Bias × Condition interaction and the accuracy-versus-speed difference in the direct effect each get their own estimate:
 
 ```python
 from scripts_analysis.aggregate import build_combined_exp2_frame
@@ -292,14 +324,24 @@ Supplementary figure numbers are not stable while the manuscript is in revision,
 |---|---|
 | No-bias benchmark: FAR dispersion expected from finite sampling alone | `simulation.no_bias_benchmark` |
 | Trial-level bias signature across correction strength (simulation) | `simulation.run_trial_level_alpha_sweep` |
+| Direct effect c' across correction strength (simulation mediation) | `simulation.alpha_digit_frames` → `mediation.run_mediation_alpha_sweep` |
 | Trial-level bias effect in humans | `trial_level.human_trial_level` |
+| Trial-level bias effect under speed pressure, joint and per condition | `trial_level.exp2_trial_level` |
 | Trial-level bias effect in ANNs, standard and learned readouts | `trial_level.ann_trial_level` |
 | RT-window sweep and correct-trials-only controls | `controls.rt_window_sweep`, `controls.correct_only` |
-| Individual differences in response bias | `controls.far_variability` |
+| Individual differences in response bias | `controls.individual_differences`, `controls.far_variability` |
 | Collinearity diagnostics (behavioural and ANN) | `collinearity.vif_table`, `collinearity.ann_vif_table` |
 | Penultimate-feature metacognitive readout | `train_metacognitive.py --mode pen_only` |
 | ANN metacognitive sensitivity (confidence–accuracy Φ) | `metacognitive_sensitivity.phi_table` |
 | M-SDT bias as the predictor instead of FAR | `msdt_model.py`, then rerun the Figure 3/4 analyses |
+
+### Two conventions worth knowing before reading the code
+
+**FAR boundary correction.** The digit-level analyses and the `sigma_b` calibration apply the half-count correction (0 → 0.5, *n* → *n* − 0.5), matching the behavioural preprocessing. The **trial-level** analyses use raw counts: there FAR is only a per-trial predictor and is never aggregated to the alternative level, so the correction would shift the predictor for no gain. Both `simulation.observer_far` and `trial_level.far_by_alternative` take an explicit `half_count` flag rather than deciding silently.
+
+**Standardisation.** Digit-level frames are z-scored globally; **trial-level** frames are z-scored *within participant*. At the trial level each participant contributes hundreds of rows, so between-participant differences in how the confidence scale is used would otherwise dominate the variance.
+
+One consequence: in `trial_level.exp2_trial_level` the `Cond_eff` **main effect is structurally zero**, because standardising within participant also standardises within condition. Only the interaction is interpretable, and the main effect is not a test of whether the instruction changed confidence — `controls.rt_manipulation_check` is.
 
 ### Reading the ANN metacognitive-sensitivity panel
 
@@ -310,10 +352,11 @@ The readouts compared there are not on equal footing, and the code says so in `m
 ## 7. Making the figures
 
 ```python
-from figures.main_figures import figure3_humans, figure4_speed_accuracy, figure_ann
+from figures.main_figures import (figure1_task_and_checks, figure3_humans,
+                                  figure4_speed_accuracy, figure_ann)
 
-figure3_humans(results, out_stem="figures_out/figure3")          # whole figure
-figure3_humans(results, panel="A", out_stem="figures_out/fig3A") # one panel, no letter
+figure3_humans(results, example=example, out_stem="figures_out/figure3")  # whole figure
+figure3_humans(results, panel="B", out_stem="figures_out/fig3B")          # one panel, no letter
 ```
 
 Every panel renders standalone, without its panel letter, so figures can be assembled by hand. Appearance is controlled by three dicts in `figures/style.py` — `FONTS`, `LAYOUT`, `STYLE` — each with a resolver that takes per-key overrides and raises `KeyError` on a typo:
@@ -324,7 +367,7 @@ figure_ann(results, phi=phi, font_scale=1.4,
            layout={"figsize": (15, 17)})
 ```
 
-Figure 1 is a task schematic and is not generated from data.
+Panel A of Figure 1 is the only element not generated from data; everything else, including Figure 1 B–D, comes from the analysis functions above.
 
 ---
 

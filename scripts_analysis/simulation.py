@@ -59,6 +59,15 @@ performance rather than on evidence strength.
 response-bias vector is fixed at zero, giving the FAR dispersion expected from
 finite sampling alone in an observer with no stable response preference.
 
+FAR BOUNDARY CORRECTION
+-----------------------
+The digit-level analyses and the sigma_b calibration apply the half-count
+boundary correction (0 -> 0.5, n -> n - 0.5), matching the behavioural
+preprocessing they are calibrated against. The trial-level analysis uses RAW
+counts, because there FAR is only a per-trial predictor and is never aggregated
+to the alternative level. ``observer_far(..., half_count=...)`` makes the choice
+explicit at each call site.
+
 KNOWN LIMITATION (stated, not modelled)
 ---------------------------------------
 Every alternative has identical discriminability here, so between-alternative
@@ -92,6 +101,12 @@ from scipy.stats import pointbiserialr
 DEFAULT_SIGMA_B = {4: 0.368, 8: 0.446}   # calibrated to the empirical FAR spread
 TARGET_ACC = 0.64                        # overall p(correct); empirical ~0.628
 N_SUBJ = 200                             # matches the empirical sample after exclusions
+# The reported digit-level sweep (Figure 2) uses 1000 observers. The point
+# estimates are the same at 200; the extra observers only narrow the intervals,
+# and the sweep is cheap enough that there is no reason to publish the wider ones.
+# The trial-level sweep and the calibration stay at N_SUBJ, where matching the
+# empirical sample size is the point.
+N_SUBJ_SWEEP = 1000
 N_TRIAL = 400                            # matches the empirical trials per observer
 CONF_NOISE = 0.0                         # late/readout noise SD on the finished confidence
 ALPHA_VALUES = np.round(np.arange(0.0, 1.0 + 1e-9, 0.1), 1)
@@ -193,8 +208,20 @@ def validate_alpha_endpoints():
     return True
 
 
-def observer_far(stim, choice, K):
-    """FAR per alternative: P(resp = k | stim != k), with the half-count correction."""
+def observer_far(stim, choice, K, half_count=True):
+    """FAR per alternative: P(resp = k | stim != k).
+
+    ``half_count`` applies the boundary correction used by the behavioural
+    preprocessing: an alternative with zero false alarms is counted as 0.5, and
+    one with false alarms on every eligible trial as n - 0.5. This keeps FAR away
+    from 0 and 1, which matters when FAR is aggregated to the alternative level.
+
+    The DIGIT-LEVEL analyses and the sigma_b calibration use it (half_count=True),
+    matching the behavioural pipeline they are calibrated against. The TRIAL-LEVEL
+    analysis does NOT: there FAR is only a per-trial predictor, never aggregated,
+    so the boundary correction would shift the predictor without purpose. Passing
+    the choice explicitly keeps the two paths auditable rather than implicit.
+    """
     far = np.empty(K)
     for k in range(K):
         notk = stim != k
@@ -203,10 +230,11 @@ def observer_far(stim, choice, K):
         if n_noise == 0:
             far[k] = np.nan
             continue
-        if count == 0.0:
-            count = 0.5
-        elif count == n_noise:
-            count = n_noise - 0.5
+        if half_count:
+            if count == 0.0:
+                count = 0.5
+            elif count == n_noise:
+                count = n_noise - 0.5
         far[k] = count / n_noise
     return far
 
@@ -355,7 +383,7 @@ def _simulate_observers(K, sigma_b, n_subj, n_trial, conf_noise, target_acc, alp
     return mu, observers
 
 
-def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
+def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ_SWEEP, n_trial=N_TRIAL, sigma_b=None,
                     conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
                     alphas=ALPHA_VALUES, seed=SEED_GENERATION, n_boot=N_BOOT,
                     verbose=True):
@@ -410,6 +438,40 @@ def run_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
     return pd.DataFrame(rows)
 
 
+def alpha_digit_frames(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
+                       conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
+                       alphas=ALPHA_VALUES, seed=SEED_GENERATION, verbose=True):
+    """Digit-level frames per (condition, alpha), named for the mediation model.
+
+    The same simulated observers ``run_alpha_sweep`` regresses, handed over with
+    the column names ``mediation.run_mediation`` expects (``FAR_z``,
+    ``accuracy_z``, ``confidence_z``, ``subject_idx``). Feeding one generative run
+    to both the regression and the mediation is the point: any difference between
+    them is the analysis, not a different simulation.
+
+    Returns ``{(condition, alpha): DataFrame}``.
+    """
+    validate_alpha_endpoints()
+    sigma_b = dict(DEFAULT_SIGMA_B) if sigma_b is None else dict(sigma_b)
+    rng = np.random.default_rng(seed)
+    alphas = np.asarray(alphas, dtype=float)
+    out = {}
+
+    for K in k_list:
+        label = f'{K}-choice'
+        _, observers = _simulate_observers(K, sigma_b[K], n_subj, n_trial, conf_noise,
+                                           target_acc, alphas, rng, verbose,
+                                           f'{label} (mediation)')
+        for alpha in alphas:
+            frames = [digit_level_table(stim, choice, correct, conf[float(alpha)], K, sid)
+                      for sid, (stim, choice, correct, conf) in enumerate(observers)]
+            df = add_global_z(pd.concat(frames, ignore_index=True))
+            out[(label, float(alpha))] = df.rename(columns={
+                'FARz': 'FAR_z', 'acc_hitz': 'accuracy_z', 'confz': 'confidence_z',
+                'sid': 'subject_idx'})
+    return out
+
+
 def run_trial_level_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, sigma_b=None,
                                 conf_noise=CONF_NOISE, target_acc=TARGET_ACC,
                                 alphas=ALPHA_VALUES, seed=SEED_TRIAL_LEVEL, verbose=True):
@@ -436,7 +498,9 @@ def run_trial_level_alpha_sweep(k_list=(4, 8), n_subj=N_SUBJ, n_trial=N_TRIAL, s
         sb = sigma_b[K]
         _, observers = _simulate_observers(K, sb, n_subj, n_trial, conf_noise, target_acc,
                                            alphas, rng, verbose, f'{label} (trial level)')
-        far_by_observer = [observer_far(stim, choice, K) for stim, choice, _, _ in observers]
+        # raw counts here: FAR is a per-trial predictor, never aggregated (see observer_far)
+        far_by_observer = [observer_far(stim, choice, K, half_count=False)
+                           for stim, choice, _, _ in observers]
 
         for alpha in alphas:
             frames = []
@@ -513,7 +577,8 @@ def calibrate_sigma_b(K, target_far_sd=None, seed=SEED_CALIBRATION, bracket=(0.0
 
 
 def no_bias_benchmark(K, n_observers=N_NULL_OBSERVERS, n_trial=N_TRIAL,
-                      target_acc=TARGET_ACC, seed=SEED_CALIBRATION, verbose=True):
+                      target_acc=TARGET_ACC, seed=SEED_CALIBRATION, verbose=True,
+                      half_count=False):
     """FAR dispersion expected from finite sampling alone, with NO response bias.
 
     The response-bias vector is fixed at zero, so the chosen alternative is simply
@@ -523,6 +588,15 @@ def no_bias_benchmark(K, n_observers=N_NULL_OBSERVERS, n_trial=N_TRIAL,
     response preference, purely because each alternative is sampled a finite
     number of times?"
 
+    This is the reference ``controls.far_variability`` tests against, and the
+    dashed line in Figure 1 panel D. Match ``target_acc`` and ``n_trial`` to the
+    condition being compared -- the null is only meaningful when the simulated
+    observers are as accurate, and run as many trials, as the real ones.
+
+    ``half_count`` is False here to match the empirical FAR the comparison uses
+    (raw counts, ``controls.far_matrix_from_trials``). At a few hundred trials per
+    observer the correction is inert either way: a zero cell does not occur.
+
     Returns (dispersions, summary) where ``dispersions`` has one value per null
     observer.
     """
@@ -531,7 +605,8 @@ def no_bias_benchmark(K, n_observers=N_NULL_OBSERVERS, n_trial=N_TRIAL,
     dispersions = np.empty(n_observers)
     for i in range(n_observers):
         stim, choice, _, _ = generate_observer(K, mu, 0.0, n_trial, 0.0, rng, alphas=[0.0])
-        dispersions[i] = np.nanstd(observer_far(stim, choice, K), ddof=1)
+        dispersions[i] = np.nanstd(observer_far(stim, choice, K, half_count=half_count),
+                                   ddof=1)
     summary = {
         'K': K, 'n_observers': int(n_observers), 'n_trial': int(n_trial), 'mu': mu,
         'mean_far_sd': float(dispersions.mean()),
@@ -551,44 +626,80 @@ def no_bias_benchmark(K, n_observers=N_NULL_OBSERVERS, n_trial=N_TRIAL,
 # ──────────────────────────────────────────────────────────────────────────────
 # Figure
 # ──────────────────────────────────────────────────────────────────────────────
-def plot_alpha_sweep(results, output_path=None, phi_panel=True):
-    """Figure 2: FAR coefficient across alpha for both nested models, plus Phi."""
+# One panel per MODEL, both conditions in each. Splitting by model rather than by
+# condition is what makes the paper's point visible: panel A is the bias-blind
+# result and panel B the same sweep once accuracy is controlled, so the sign flip
+# is a comparison between two panels rather than two lines inside one.
+FIGURE2_PANELS = [('far',     'Bias-only regression',
+                   'FAR coefficient\n(no accuracy control)'),
+                  ('far_acc', 'Bias + Acc regression',
+                   'FAR coefficient\n(accuracy controlled)')]
+FIGURE2_PHI_PANEL = ('Metacognitive sensitivity', 'Phi')
+CONDITION_COLORS = ('#4E79A7', '#E15759')          # 4-choice, 8-choice
+FIGURE2_XLABEL = r'Bias-correction strength $\alpha$'
+
+
+def plot_alpha_sweep(results, output_path=None, phi_panel=True, fontsizes=None,
+                     figsize=None, colors=CONDITION_COLORS):
+    """Figure 2: the alpha sweep, one panel per nested model plus metacognitive sensitivity.
+
+    A  bias-only regression, both conditions
+    B  bias + accuracy regression, both conditions
+    C  metacognitive sensitivity across alpha
+
+    ``fontsizes`` overrides any of ``title``, ``axis_label``, ``tick``, ``legend``,
+    ``panel_letter``.
+    """
     import matplotlib.pyplot as plt
 
+    ft = {'title': 15.0, 'axis_label': 13.0, 'tick': 11.5, 'legend': 12.0,
+          'panel_letter': 23.0}
+    ft.update(fontsizes or {})
     conditions = list(dict.fromkeys(results['condition']))
-    n_panels = len(conditions) + (1 if phi_panel else 0)
-    fig, axes = plt.subplots(1, n_panels, figsize=(4.6 * n_panels, 4.0))
+    panels = list(FIGURE2_PANELS)
+    n_panels = len(panels) + (1 if phi_panel else 0)
+    fig, axes = plt.subplots(1, n_panels, figsize=figsize or (5.2 * n_panels, 4.6))
     axes = np.atleast_1d(axes)
-    colors = {'far': '#4E79A7', 'far_acc': '#E15759'}
 
-    for ax, condition in zip(axes, conditions):
-        sub = results[results['condition'] == condition]
-        for key, (_, label) in MODEL_SPECS.items():
-            block = sub[sub['model_key'] == key].sort_values('alpha')
-            ax.plot(block['alpha'], block['coef'], '-o', ms=4, color=colors[key], label=label)
+    for ax, (key, title, ylabel) in zip(axes, panels):
+        for i, condition in enumerate(conditions):
+            block = results[(results['condition'] == condition)
+                            & (results['model_key'] == key)].sort_values('alpha')
+            colour = colors[i % len(colors)]
+            ax.plot(block['alpha'], block['coef'], '-o', ms=5.5, lw=2.2, color=colour,
+                    label=condition)
             ax.fill_between(block['alpha'], block['ci_low'], block['ci_high'],
-                            color=colors[key], alpha=0.18, lw=0)
-        ax.axhline(0, color='black', lw=0.9)
-        ax.set_xlabel(r'Bias correction strength $\alpha$', fontweight='bold')
-        ax.set_ylabel(r'FAR effect on confidence ($\beta$)', fontweight='bold')
-        ax.set_title(condition, fontweight='bold')
-        ax.grid(axis='y', linestyle='--', alpha=0.25)
-        ax.legend(frameon=False, fontsize=9)
+                            color=colour, alpha=0.18, lw=0)
+        ax.axhline(0, color='black', lw=1.0, zorder=1)     # the sign flip matters here
+        ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold')
+        ax.set_title(title, fontsize=ft['title'], fontweight='bold', pad=8)
 
     if phi_panel:
         ax = axes[-1]
-        for condition, colour in zip(conditions, ('#4E79A7', '#F28E2B')):
+        title, ylabel = FIGURE2_PHI_PANEL
+        for i, condition in enumerate(conditions):
             block = (results[(results['condition'] == condition) &
                              (results['model_key'] == 'far_acc')].sort_values('alpha'))
-            ax.errorbar(block['alpha'], block['phi'], yerr=block['phi_sem'],
-                        fmt='-o', ms=4, capsize=3, color=colour, label=condition)
-        ax.set_xlabel(r'Bias correction strength $\alpha$', fontweight='bold')
-        ax.set_ylabel(r'Metacognitive sensitivity $\Phi$', fontweight='bold')
-        ax.set_title('Metacognitive sensitivity', fontweight='bold')
-        ax.grid(axis='y', linestyle='--', alpha=0.25)
-        ax.legend(frameon=False, fontsize=9)
+            colour = colors[i % len(colors)]
+            ax.plot(block['alpha'], block['phi'], '-o', ms=5.5, lw=2.2, color=colour,
+                    label=condition)
+            lo = block['phi_ci_low'] if 'phi_ci_low' in block else block['phi'] - block['phi_sem']
+            hi = block['phi_ci_high'] if 'phi_ci_high' in block else block['phi'] + block['phi_sem']
+            ax.fill_between(block['alpha'], lo, hi, color=colour, alpha=0.18, lw=0)
+        ax.set_ylabel(ylabel, fontsize=ft['axis_label'], fontweight='bold')
+        ax.set_title(title, fontsize=ft['title'], fontweight='bold', pad=8)
+
+    for ax in axes:
+        ax.set_xlabel(FIGURE2_XLABEL, fontsize=ft['axis_label'], fontweight='bold')
+        ax.tick_params(labelsize=ft['tick'])
+        ax.grid(axis='y', linestyle='--', alpha=0.30)
+        ax.legend(frameon=False, fontsize=ft['legend'])
 
     fig.tight_layout()
+    for ax, letter in zip(axes, 'ABC'):
+        pos = ax.get_position()
+        fig.text(max(0.002, pos.x0 - 0.048), min(0.999, pos.y1 + 0.075), letter,
+                 fontsize=ft['panel_letter'], fontweight='bold', ha='left', va='center')
     if output_path:
         fig.savefig(output_path, bbox_inches='tight', facecolor='white')
         print(f'Saved figure -> {output_path}')
@@ -616,7 +727,9 @@ def print_summary(results):
 def main():
     p = argparse.ArgumentParser(
         description='Multi-alternative SDT simulation of bias-blind vs bias-aware confidence.')
-    p.add_argument('--n_subj', type=int, default=N_SUBJ)
+    p.add_argument('--n_subj', type=int, default=None,
+                   help=f'Observers per condition. Defaults to {N_SUBJ_SWEEP} for the '
+                        f'digit-level sweep (the reported run) and {N_SUBJ} elsewhere.')
     p.add_argument('--n_trial', type=int, default=N_TRIAL)
     p.add_argument('--conf_noise', type=float, default=CONF_NOISE,
                    help='Late (readout) metacognitive noise SD.')
@@ -634,9 +747,11 @@ def main():
     p.add_argument('--calibrate', action='store_true',
                    help='Re-solve sigma_b against the empirical FAR dispersion (slow).')
     args = p.parse_args()
+    default_n_subj = N_SUBJ if (args.trial_level or args.calibrate) else N_SUBJ_SWEEP
+    n_subj = default_n_subj if args.n_subj is None else args.n_subj
 
     if args.calibrate:
-        return {K: calibrate_sigma_b(K, n_subj=args.n_subj, n_trial=args.n_trial,
+        return {K: calibrate_sigma_b(K, n_subj=n_subj, n_trial=args.n_trial,
                                      target_acc=args.target_acc)
                 for K in args.k_list}
     if args.no_bias:
@@ -653,7 +768,7 @@ def main():
     runner = run_trial_level_alpha_sweep if args.trial_level else run_alpha_sweep
     seed = args.seed if args.seed is not None else (
         SEED_TRIAL_LEVEL if args.trial_level else SEED_GENERATION)
-    results = runner(k_list=tuple(args.k_list), n_subj=args.n_subj, n_trial=args.n_trial,
+    results = runner(k_list=tuple(args.k_list), n_subj=n_subj, n_trial=args.n_trial,
                      conf_noise=args.conf_noise, target_acc=args.target_acc,
                      alphas=alphas, seed=seed)
 
