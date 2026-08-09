@@ -32,6 +32,24 @@ def star_label(p, ns=''):
     return '***' if p < 0.001 else '**' if p < 0.01 else '*' if p < 0.05 else ns
 
 
+def error_bar(values, kind='sem'):
+    """SEM or a 95% CI half-width for a set of per-participant values.
+
+    The manuscript's convention: DESCRIPTIVE means (raw confidence, RT, FAR
+    spread, profile distances) carry SEM; MODEL estimates (regression
+    coefficients, posterior means) carry a 95% interval. Passing ``kind``
+    explicitly at each call site keeps a panel from drifting from its caption.
+    """
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    sem = np.std(values, ddof=1) / np.sqrt(len(values))
+    if kind == 'sem':
+        return sem
+    if kind in ('ci95', 'ci'):
+        return 1.96 * sem
+    raise ValueError(f"error kind must be 'sem' or 'ci95', got {kind!r}")
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 def draw_nested_bars(ax, stats, scatter, title='', ylim=(-0.2, 0.3), star_y=None,
                      labels=None, ytick_step=0.1, ft=None, st=None,
@@ -290,7 +308,8 @@ def draw_grouped_bars(ax, values, groups, series, colors=None, ft=None, st=None,
 # ──────────────────────────────────────────────────────────────────────────────
 def draw_paired_bars(ax, values_a, values_b, labels=('Accuracy', 'Speed'), p=None,
                      ylabel='', title='', ft=None, st=None, seed=0, colors=None,
-                     ylim=None, bracket_frac=0.83, star_fontsize=None, bold_ticks=False):
+                     ylim=None, bracket_frac=0.83, star_fontsize=None, bold_ticks=False,
+                     error='sem'):
     """Two paired conditions with individual points and a t-test bracket.
 
     Used for the Experiment 2 manipulation check (decision RT and confidence RT)
@@ -300,16 +319,19 @@ def draw_paired_bars(ax, values_a, values_b, labels=('Accuracy', 'Speed'), p=Non
     zero needs -- a 1-4 confidence scale, say; the bracket then sits at
     ``bracket_frac`` of the range. Left as None the range is derived from the data
     and starts at zero.
+
+    ``error`` is 'sem' (the manuscript's convention for these descriptive
+    panels) or 'ci95'.
     """
     ft, st = ft or resolve_fonts(), st or resolve_style()
     colors = list(colors or (st['acc_color'], st['speed_color']))
     a = np.asarray(values_a, dtype=float)
     b = np.asarray(values_b, dtype=float)
-    ci95 = lambda v: 1.96 * np.std(v, ddof=1) / np.sqrt(len(v))
+    err = lambda v: error_bar(v, error)
     x = np.array([0.0, 1.0])
     width = 0.60
 
-    ax.bar(x, [a.mean(), b.mean()], yerr=[ci95(a), ci95(b)], width=width,
+    ax.bar(x, [a.mean(), b.mean()], yerr=[err(a), err(b)], width=width,
            color=colors, alpha=0.70,
            edgecolor=st['bar_edgecolor'], linewidth=st['bar_edge_lw'], capsize=6,
            zorder=1, error_kw=dict(lw=1.5, capthick=1.5, ecolor='black', zorder=6))
@@ -408,7 +430,7 @@ def draw_far_profiles(ax, far, alternatives, labels=None, headroom=1.42,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-def draw_far_sd_vs_null(ax, spreads, nulls, labels, p_values=None, seed=0,
+def draw_far_sd_vs_null(ax, spreads, nulls, labels, p_values=None, seed=0, error='sem',
                         headroom=1.24, ylabel='SD of FAR across choices',
                         null_label='no-bias null', line_half=0.36, leader_inset=0.30,
                         label_dy=0.30, star_y=0.965, ft=None, st=None):
@@ -429,7 +451,7 @@ def draw_far_sd_vs_null(ax, spreads, nulls, labels, p_values=None, seed=0,
 
     for i, values in enumerate(spreads):
         values = np.asarray(values, dtype=float)
-        ci = 1.96 * values.std(ddof=1) / np.sqrt(len(values))
+        ci = error_bar(values, error)
         ax.bar(x[i], values.mean(), width=st['bar_width'] * 1.09,
                color=colours[i % len(colours)], alpha=0.80,
                edgecolor=st['bar_edgecolor'], linewidth=st['bar_edge_lw'], zorder=2)

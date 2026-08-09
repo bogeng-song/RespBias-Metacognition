@@ -318,22 +318,28 @@ Both freeze the base classifier and train only the readout, with the same data, 
 
 ## 6. Supplementary analyses
 
-Supplementary figure numbers are not stable while the manuscript is in revision, so these are listed by what they show.
+Numbering follows the submitted supplement.
 
-| Analysis | Code |
-|---|---|
-| No-bias benchmark: FAR dispersion expected from finite sampling alone | `simulation.no_bias_benchmark` |
-| Trial-level bias signature across correction strength (simulation) | `simulation.run_trial_level_alpha_sweep` |
-| Direct effect c' across correction strength (simulation mediation) | `simulation.alpha_digit_frames` → `mediation.run_mediation_alpha_sweep` |
-| Trial-level bias effect in humans | `trial_level.human_trial_level` |
-| Trial-level bias effect under speed pressure, joint and per condition | `trial_level.exp2_trial_level` |
-| Trial-level bias effect in ANNs, standard and learned readouts | `trial_level.ann_trial_level` |
-| RT-window sweep and correct-trials-only controls | `controls.rt_window_sweep`, `controls.correct_only` |
-| Individual differences in response bias | `controls.individual_differences`, `controls.far_variability` |
-| Collinearity diagnostics (behavioural and ANN) | `collinearity.vif_table`, `collinearity.ann_vif_table` |
-| Penultimate-feature metacognitive readout | `train_metacognitive.py --mode pen_only` |
-| ANN metacognitive sensitivity (confidence–accuracy Φ) | `metacognitive_sensitivity.phi_table` |
-| M-SDT bias as the predictor instead of FAR | `msdt_model.py`, then rerun the Figure 3/4 analyses |
+| # | Analysis | Code |
+|---|---|---|
+| S1 | Trial-level bias signature across correction strength (simulation) | `simulation.run_trial_level_alpha_sweep` |
+| S2 | Trial-level bias effect in humans, both experiments | `trial_level.human_trial_level`, `trial_level.exp2_trial_level` |
+| S3 | Trial-level bias effect in ANNs, standard and learned readouts | `trial_level.ann_trial_level` |
+| S4 | RT-window sweep and correct-trials-only controls | `controls.rt_window_sweep`, `controls.correct_only` |
+| S5 | Direct effect c′ across correction strength (simulation mediation) | `simulation.alpha_digit_frames` → `mediation.run_mediation_alpha_sweep` |
+| S6 | SoftMax confidence readout | `aggregate.aggregate_ann_csv(conf_col="max_softmax")` |
+| S7 | Penultimate-feature metacognitive readout | `train_metacognitive.py --mode pen_only` |
+| S8 | Response bias is stable across testing days | `controls.day_split_reliability` |
+| Table 1 | Collinearity diagnostics (behavioural and ANN) | `collinearity.vif_table`, `collinearity.ann_vif_table` |
+| — | No-bias benchmark: FAR dispersion from finite sampling alone (Figure 1D) | `simulation.no_bias_benchmark` |
+| — | ANN metacognitive sensitivity (confidence–accuracy Φ, Figure 6C) | `metacognitive_sensitivity.phi_table` |
+| — | M-SDT bias as the predictor instead of FAR | `msdt_model.py`, then rerun the Figure 3/4 analyses |
+
+### Supplementary Figure 8 needs to know which day each trial came from
+
+`day_split_reliability` measures response bias separately in each of the two testing sessions. The shipped Experiment 1 CSVs carry no session column, so `split_by_session` falls back to splitting each participant's rows by order — the first 200 are day 1 — and warns when it does.
+
+That fallback is only correct because the rows are chronological within participant. It was verified against the source file that does carry the session label, and the two agree for all 200 participants in both conditions. **Adding an explicit `Session` column to the OSF CSVs would remove the assumption**; `split_by_session` uses it automatically when present.
 
 ### Two conventions worth knowing before reading the code
 

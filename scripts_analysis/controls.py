@@ -35,10 +35,10 @@ INDIVIDUAL DIFFERENCES AND THE BEHAVIOURAL CHECKS (FIGURE 1)
                              tested against the spread an UNBIASED observer would
                              still show from finite sampling alone. Figure 1
                              panel D.
-``individual_differences``   which alternative each participant over- and
-                             under-selects, the within-participant FAR range, and
-                             the per-alternative FAR distribution. Supplementary
-                             Figure 5.
+``day_split_reliability``    is response bias a stable property of a PERSON?
+                             Bias is measured separately on each of the two
+                             testing days, then compared within versus across
+                             participants. Supplementary Figure 8.
 
 The reference for ``far_variability`` is not zero. Any participant, biased or
 not, shows some FAR spread purely because each alternative is sampled a finite
@@ -50,7 +50,7 @@ M-SDT observers with the bias vector fixed at zero.
 Usage
 -----
     from scripts_analysis.controls import (rt_window_sweep, correct_only,
-                                           far_variability, behavioural_checks)
+                                           behavioural_checks, day_split_reliability)
 """
 
 import warnings
@@ -141,12 +141,15 @@ def correct_only(trials, aggregate_fn, correct_col='Correct',
     return pd.DataFrame(rows)
 
 
-def far_matrix_from_trials(trials, alternatives=None, columns=None):
+def far_matrix_from_trials(trials, alternatives=None, columns=None, half_count=False):
     """Participant x alternative FAR matrix from a raw trial file.
 
-    Raw counts, no boundary correction: with a few hundred trials per participant
-    a zero cell essentially never occurs, and everything downstream is a spread
-    across alternatives rather than a rate near a boundary.
+    ``half_count`` applies the boundary correction (0 -> 0.5, n -> n - 0.5). It is
+    off by default because over a full condition (~400 trials) a zero cell
+    essentially never occurs and the corrected and raw matrices agree to four
+    decimals. Turn it ON when splitting a condition into halves: at 200 trials
+    roughly 6% of 8-choice cells have zero false alarms, and leaving those as hard
+    zeros shrinks the per-half SD for exactly the least-biased participants.
 
     Returns ``(far, participant_ids, alternatives)``.
     """
@@ -162,8 +165,14 @@ def far_matrix_from_trials(trials, alternatives=None, columns=None):
         resp = block[columns['response']].to_numpy()
         for col, alternative in enumerate(alternatives):
             notk = stim != alternative
-            if notk.any():
-                far[row, col] = ((resp == alternative) & notk).sum() / notk.sum()
+            n_noise = float(notk.sum())
+            if n_noise == 0:
+                continue
+            count = float(((resp == alternative) & notk).sum())
+            if half_count:
+                count = 0.5 if count == 0 else (n_noise - 0.5 if count == n_noise
+                                                else count)
+            far[row, col] = count / n_noise
     return far, ids, np.asarray(alternatives)
 
 
@@ -271,38 +280,131 @@ def select_example_profiles(far_matrix, participant_ids, requested=None, n_examp
     return candidates[np.asarray(chosen)]
 
 
-def individual_differences(far_matrix, alternatives, label=''):
-    """How response bias varies from participant to participant (Supp. Figure 5).
+# ──────────────────────────────────────────────────────────────────────────────
+# Supplementary Figure 8: is response bias a stable property of a person?
+# ──────────────────────────────────────────────────────────────────────────────
+SESSION_COLUMN = 'Session'          # used when the trial file carries it
+TRIALS_PER_SESSION = 200            # Experiment 1: 200 analysed trials per day
 
-    Returns the four things the supplementary figure shows:
 
-        most_chosen / least_chosen  % of participants whose highest / lowest FAR
-                                    falls on each alternative, against the 100/K
-                                    that uniform preference would give
-        far_range                   per-participant max FAR minus min FAR
-        per_alternative             the FAR column for each alternative, for the
-                                    box plot, against the 1/K uniform reference
+def split_by_session(trials, columns=None, session_column=SESSION_COLUMN,
+                     trials_per_session=TRIALS_PER_SESSION):
+    """Return the day-1 and day-2 halves of an Experiment 1 trial file.
+
+    If the file carries an explicit session column, that is used. The shipped
+    CSVs do not, so the fallback splits each participant's trials by ORDER: the
+    first ``trials_per_session`` rows are day 1 and the rest day 2.
+
+    That fallback is only valid because the rows are in chronological order
+    within participant, which was verified against the source file that does
+    carry the session label -- the two agree for all 200 participants in both
+    conditions. It is stated here rather than assumed silently, and an explicit
+    session column in the CSV would make it unnecessary.
     """
-    far = np.asarray(far_matrix, dtype=float)
-    K = far.shape[1]
-    most, least = np.nanargmax(far, axis=1), np.nanargmin(far, axis=1)
-    counts = lambda idx: 100.0 * np.bincount(idx, minlength=K) / len(idx)
-    far_range = np.nanmax(far, axis=1) - np.nanmin(far, axis=1)
+    columns = columns or {'subject': 'Sub_id'}
+    if session_column in trials.columns:
+        values = sorted(trials[session_column].unique())
+        if len(values) != 2:
+            raise ValueError(f'Expected 2 sessions in {session_column!r}, got {values}')
+        return (trials[trials[session_column] == values[0]],
+                trials[trials[session_column] == values[1]])
+
+    counts = trials.groupby(columns['subject']).size().unique()
+    if len(counts) != 1 or counts[0] != 2 * trials_per_session:
+        raise ValueError(
+            f'Cannot split by trial order: participants have {counts} trials, expected '
+            f'{2 * trials_per_session}. Add a {session_column!r} column to the CSV.')
+    warnings.warn(
+        f'No {session_column!r} column; splitting each participant at trial '
+        f'{trials_per_session} by row order. See split_by_session for why that is valid '
+        f'for the shipped files.', RuntimeWarning)
+    rank = trials.groupby(columns['subject']).cumcount()
+    return trials[rank < trials_per_session], trials[rank >= trials_per_session]
+
+
+def profile_distance(far_day1, far_day2, metric='abs_diff'):
+    """All-pairs comparison of day-1 against day-2 FAR profiles.
+
+    ``D[i, j]`` compares participant i's day 1 with participant j's day 2, so the
+    diagonal is within-participant and every off-diagonal entry is across.
+
+    'abs_diff'    summed |FAR_day1 - FAR_day2| across alternatives. Small = similar.
+    'correlation' Pearson r between the two profiles. Large = similar.
+    """
+    far_day1 = np.asarray(far_day1, dtype=float)
+    far_day2 = np.asarray(far_day2, dtype=float)
+    if metric == 'abs_diff':
+        return np.abs(far_day1[:, None, :] - far_day2[None, :, :]).sum(axis=2)
+    if metric == 'correlation':
+        def z(M):
+            sd = M.std(1, ddof=1, keepdims=True)
+            return (M - M.mean(1, keepdims=True)) / np.where(sd > 0, sd, np.nan)
+        return z(far_day1) @ z(far_day2).T / (far_day1.shape[1] - 1)
+    raise ValueError(f"metric must be 'abs_diff' or 'correlation', got {metric!r}")
+
+
+def day_split_reliability(csv_path, alternatives=None, columns=None, metric='abs_diff',
+                          label='', **split_kwargs):
+    """Two ways of asking whether response bias belongs to the person (Supp. Fig. 8).
+
+    Panel A -- does bias MAGNITUDE carry over? Correlate the SD of FAR across
+    alternatives on day 1 with the same quantity on day 2. A positive correlation
+    means participants who spread their false alarms unevenly on day 1 do so
+    again on day 2.
+
+    Panel B -- does the SHAPE of the bias carry over? For each participant,
+    compare their day-1 profile with their own day-2 profile (``within``) and with
+    every OTHER participant's day-2 profile (``across``, averaged over the rest).
+    Each participant's day 1 enters both terms, so the two are paired and nothing
+    is double-counted. If bias is idiosyncratic rather than a preference shared
+    across the sample, ``within`` is the smaller distance.
+
+    With ``metric='abs_diff'`` the value is a summed distance and therefore scales
+    with the number of alternatives: the 4- and 8-choice results are comparable
+    within a condition, not to each other.
+    """
+    columns = columns or {'subject': 'Sub_id', 'stimulus': 'Stimulus',
+                          'response': 'Response'}
+    trials = pd.read_csv(csv_path)
+    day1_trials, day2_trials = split_by_session(trials, columns, **split_kwargs)
+    if alternatives is None:
+        alternatives = np.sort(trials[columns['stimulus']].dropna().unique())
+
+    # half-count ON: each day is only half the trials (see far_matrix_from_trials)
+    far1, ids1, _ = far_matrix_from_trials(day1_trials, alternatives, columns,
+                                           half_count=True)
+    far2, ids2, _ = far_matrix_from_trials(day2_trials, alternatives, columns,
+                                           half_count=True)
+    if not np.array_equal(ids1, ids2):
+        raise ValueError('The two sessions contain different participants.')
+
+    sd1, sd2 = np.nanstd(far1, axis=1, ddof=1), np.nanstd(far2, axis=1, ddof=1)
+    keep = np.isfinite(sd1) & np.isfinite(sd2)
+    r, p_r = stats.pearsonr(sd1[keep], sd2[keep])
+
+    distance = profile_distance(far1, far2, metric)
+    n = len(ids1)
+    within = np.diag(distance).copy()
+    across = (np.nansum(distance, axis=1) - within) / (n - 1)
+    t, p_t = stats.ttest_rel(within, across)
+    difference = within - across
+
     out = {
-        'dataset': label,
-        'alternatives': list(alternatives),
-        'n_participants': int(far.shape[0]),
-        'most_chosen_pct': counts(most),
-        'least_chosen_pct': counts(least),
-        'chance_pct': 100.0 / K,
-        'far_range': far_range,
-        'mean_far_range': float(np.nanmean(far_range)),
-        'median_far_range': float(np.nanmedian(far_range)),
-        'per_alternative': [far[:, j] for j in range(K)],
-        'uniform_far': 1.0 / K,
+        'dataset': label or str(csv_path), 'metric': metric,
+        'alternatives': list(alternatives), 'participant_ids': ids1,
+        'far_day1': far1, 'far_day2': far2, 'sd_day1': sd1, 'sd_day2': sd2,
+        'within': within, 'across': across,
+        'sd_correlation': {'r': float(r), 'p': float(p_r), 'n': int(keep.sum()),
+                           'df': int(keep.sum()) - 2},
+        'within_vs_across': {'t': float(t), 'p': float(p_t), 'df': n - 1,
+                             'mean_within': float(np.nanmean(within)),
+                             'mean_across': float(np.nanmean(across)),
+                             'cohen_dz': float(np.nanmean(difference)
+                                               / np.nanstd(difference, ddof=1))},
     }
-    print(f'{label}: FAR range across alternatives, mean {out["mean_far_range"]:.3f} / '
-          f'median {out["median_far_range"]:.3f} (uniform FAR would be {1.0 / K:.3f})')
+    print(f'{out["dataset"]}: SD day1 vs day2 r({out["sd_correlation"]["df"]}) = {r:.3f}, '
+          f'p = {p_r:.3g} | {metric} within {np.nanmean(within):.4f} vs across '
+          f'{np.nanmean(across):.4f}, t({n - 1}) = {t:.2f}, p = {p_t:.3g}')
     return out
 
 
